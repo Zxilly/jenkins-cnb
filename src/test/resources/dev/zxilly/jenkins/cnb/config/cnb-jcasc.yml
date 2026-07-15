@@ -1,0 +1,38 @@
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          - cnbToken:
+              scope: GLOBAL
+              id: "scan"
+              description: "CNB scan and checkout token"
+              token: "scan-token-value"
+          - string:
+              id: "report"
+              description: "Reporting test token"
+              secret: "report-token-value"
+          - string:
+              id: "webhook"
+              description: "Webhook test secret"
+              secret: "secret-value"
+
+unclassified:
+  cnb:
+    organizationReconciliationEnabled: true
+    organizationReconciliationIntervalSeconds: 7200
+    servers:
+      - id: "enterprise"
+        name: "Enterprise CNB"
+        webUrl: "https://cnb.example.com"
+        apiUrl: "https://api.cnb.example.com"
+        credentialsId: "scan"
+        reportingCredentialsId: "report"
+        webhookCredentials:
+          - repositoryPath: "acme/application"
+            secretCredentialsId: "webhook"
+        eventPollingEnabled: true
+        eventPollingIntervalSeconds: 180
+        maxWebhookAgeSeconds: 600
+        connectTimeoutSeconds: 5
+        requestTimeoutSeconds: 20
+        statusReportingMode: "PULL_REQUEST_COMMENT"

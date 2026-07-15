@@ -1,0 +1,5 @@
+<?jelly escape-by-default='true'?>
+<div>
+  Production-grade Jenkins integration for CNB repositories, pull requests, events, and build
+  metadata.
+</div>

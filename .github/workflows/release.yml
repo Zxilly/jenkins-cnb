@@ -1,0 +1,43 @@
+name: Release HPI
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  attestations: write
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+      - name: Build release
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: ./mvnw -B -ntp -Drevision="${VERSION#v}" -Dchangelist= clean verify
+      - name: Create checksum
+        run: sha256sum target/cnb.hpi > target/cnb.hpi.sha256
+      - name: Attest release provenance
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4
+        with:
+          subject-path: target/cnb.hpi
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          target/cnb.hpi
+          target/cnb.hpi.sha256
+          --verify-tag
+          --generate-notes
+          --title "$GITHUB_REF_NAME"

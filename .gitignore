@@ -1,0 +1,16 @@
+/tmp/
+/target/
+/.idea/
+/.vscode/
+/.classpath
+/.project
+/.settings/
+*.iml
+*.hpi
+*.jpi
+*.log
+.DS_Store
+
+# Local Jenkins runtime created by mvn hpi:run
+/work/
+/jenkins-home/

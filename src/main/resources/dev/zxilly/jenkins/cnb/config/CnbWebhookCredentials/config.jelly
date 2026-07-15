@@ -1,0 +1,12 @@
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core" xmlns:f="/lib/form">
+  <f:entry title="Repository path" field="repositoryPath">
+    <f:textbox placeholder="namespace/project" />
+  </f:entry>
+  <f:entry title="Webhook HMAC secret" field="secretCredentialsId">
+    <f:select />
+  </f:entry>
+  <f:entry title="Previous HMAC secret" field="previousSecretCredentialsId">
+    <f:select />
+  </f:entry>
+</j:jelly>
