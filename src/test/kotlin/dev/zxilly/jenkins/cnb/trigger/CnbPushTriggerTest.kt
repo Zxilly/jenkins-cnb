@@ -18,6 +18,7 @@ import dev.zxilly.jenkins.cnb.webhook.CnbWebhookPayload
 import dev.zxilly.jenkins.cnb.webhook.CnbWebhookPullRequest
 import dev.zxilly.jenkins.cnb.webhook.CnbWebhookRef
 import dev.zxilly.jenkins.cnb.webhook.CnbWebhookRepository
+import hudson.util.FormValidation
 import jenkins.model.Jenkins
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -28,8 +29,75 @@ import org.junit.jupiter.api.Test
 import org.jvnet.hudson.test.JenkinsRule
 import org.jvnet.hudson.test.junit.jupiter.WithJenkins
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicInteger
 
 class CnbPushTriggerTest {
+    @Test
+    @WithJenkins
+    fun `label descriptor autocompletes and warns without blocking configuration`(jenkins: JenkinsRule) {
+        val calls = AtomicInteger()
+        var catalog: CnbRepositoryLabelCatalogResult =
+            CnbRepositoryLabelCatalogResult.Available(listOf("ready", "release", "security-reviewed"), complete = true)
+        val descriptor =
+            CnbPushTrigger.DescriptorImpl(
+                CnbRepositoryLabelLookup { _, _ ->
+                    calls.incrementAndGet()
+                    catalog
+                },
+            )
+        val project = jenkins.createFreeStyleProject("labels")
+
+        assertEquals(
+            listOf("ready", "release"),
+            descriptor
+                .doAutoCompleteRequiredPullRequestLabels(project, "primary", "team/project", "ready, re")
+                .values,
+        )
+        assertEquals(
+            FormValidation.Kind.OK,
+            descriptor
+                .doCheckRequiredPullRequestLabels(project, "ready", "skip", "primary", "team/project")
+                .kind,
+        )
+        assertEquals(
+            FormValidation.Kind.WARNING,
+            descriptor
+                .doCheckRequiredPullRequestLabels(project, "ready,missing", "skip", "primary", "team/project")
+                .kind,
+        )
+
+        catalog = CnbRepositoryLabelCatalogResult.Available(listOf("ready"), complete = false)
+        assertEquals(
+            FormValidation.Kind.WARNING,
+            descriptor
+                .doCheckExcludedPullRequestLabels(project, "skip", "ready", "primary", "team/project")
+                .kind,
+        )
+        catalog = CnbRepositoryLabelCatalogResult.Unavailable
+        assertEquals(
+            FormValidation.Kind.WARNING,
+            descriptor
+                .doCheckRequiredPullRequestLabels(project, "ready", "", "primary", "team/project")
+                .kind,
+        )
+
+        val callsBeforeLocalFailure = calls.get()
+        assertEquals(
+            FormValidation.Kind.ERROR,
+            descriptor
+                .doCheckRequiredPullRequestLabels(project, "ready", "ready", "primary", "team/project")
+                .kind,
+        )
+        assertEquals(callsBeforeLocalFailure, calls.get())
+        assertEquals(
+            emptyList<String>(),
+            descriptor
+                .doAutoCompleteRequiredPullRequestLabels(null, "primary", "team/project", "re")
+                .values,
+        )
+        assertEquals(callsBeforeLocalFailure, calls.get())
+    }
+
     @Test
     fun `matches live pushes but never schedules a deleted ref`() {
         val trigger = CnbPushTrigger("cnb-cool", "team/project", "release/**")
