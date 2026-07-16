@@ -226,6 +226,28 @@
             <goals>
               <goal>prepare-agent</goal>
             </goals>
+            <configuration>
+              <destFile>${project.build.directory}/jacoco-${surefire.forkNumber}.exec</destFile>
+              <append>true</append>
+            </configuration>
+          </execution>
+          <execution>
+            <id>merge-jacoco-forks</id>
+            <phase>verify</phase>
+            <goals>
+              <goal>merge</goal>
+            </goals>
+            <configuration>
+              <fileSets>
+                <fileSet>
+                  <directory>${project.build.directory}</directory>
+                  <includes>
+                    <include>jacoco-*.exec</include>
+                  </includes>
+                </fileSet>
+              </fileSets>
+              <destFile>${project.build.directory}/jacoco.exec</destFile>
+            </configuration>
           </execution>
           <execution>
             <id>jacoco-report</id>
@@ -416,6 +438,16 @@
   </build>
 
   <profiles>
+    <profile>
+      <id>faster-tests</id>
+      <activation>
+        <activeByDefault>true</activeByDefault>
+      </activation>
+      <properties>
+        <!-- Keep test classes isolated while allowing independent Jenkins instances to run concurrently. -->
+        <forkCount>0.45C</forkCount>
+      </properties>
+    </profile>
     <!--
       Stable CodeQL does not yet understand Kotlin 2.4.10. Normal and release builds stay on
       Kotlin 2.4.10; activate this profile only for CodeQL extraction. Remove it after
