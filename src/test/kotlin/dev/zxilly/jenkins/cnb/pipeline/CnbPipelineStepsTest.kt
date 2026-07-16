@@ -2,6 +2,11 @@ package dev.zxilly.jenkins.cnb.pipeline
 
 import dev.zxilly.jenkins.cnb.api.CnbClient
 import dev.zxilly.jenkins.cnb.api.model.CnbApiCapabilities
+import dev.zxilly.jenkins.cnb.api.model.CnbBadge
+import dev.zxilly.jenkins.cnb.api.model.CnbBadgeGroup
+import dev.zxilly.jenkins.cnb.api.model.CnbBadgeSummary
+import dev.zxilly.jenkins.cnb.api.model.CnbBadgeUploadRequest
+import dev.zxilly.jenkins.cnb.api.model.CnbBadgeUploadResult
 import dev.zxilly.jenkins.cnb.api.model.CnbBuildNpcName
 import dev.zxilly.jenkins.cnb.api.model.CnbBuildRequest
 import dev.zxilly.jenkins.cnb.api.model.CnbBuildResult
@@ -241,6 +246,107 @@ class CnbPipelineStepsTest {
     }
 
     @Test
+    fun `badge list returns CPS safe Pipeline values`() {
+        val client =
+            client(
+                handlers =
+                    mapOf(
+                        "listBadges" to {
+                            listOf(
+                                CnbBadgeSummary(
+                                    name = "security/tca",
+                                    description = "Tencent Code Analysis",
+                                    type = "git",
+                                    group = CnbBadgeGroup("available", "Security", "Security"),
+                                    url = "https://cnb.cool/team/project/-/badge/git/latest/security/tca",
+                                ),
+                            )
+                        },
+                    ),
+            )
+
+        val result = CnbStepDispatcher.execute(CnbStepRequest.Badges, context, client) as List<*>
+        val badge = result.single() as Map<*, *>
+        val group = badge["group"] as Map<*, *>
+
+        assertEquals("security/tca", badge["name"])
+        assertEquals("https://cnb.cool/team/project/-/badge/git/latest/security/tca", badge["url"])
+        assertEquals("Security", group["type"])
+        assertFalse(badge.containsKey("token"))
+    }
+
+    @Test
+    fun `badge read returns CPS safe Pipeline values`() {
+        var arguments: List<Any?> = emptyList()
+        val client =
+            client(
+                handlers =
+                    mapOf(
+                        "getBadge" to { args ->
+                            arguments = args.orEmpty().toList()
+                            CnbBadge(
+                                color = "#2cbe4e",
+                                label = "build",
+                                message = "passing",
+                                link = "https://jenkins.example/job/1",
+                                links = listOf("https://jenkins.example/job/1"),
+                            )
+                        },
+                    ),
+            )
+
+        val result =
+            CnbStepDispatcher.execute(
+                CnbStepRequest.Badge("security/tca", "latest", "master"),
+                context,
+                client,
+            ) as Map<*, *>
+
+        assertEquals(listOf("team/project", "security/tca", "latest", "master"), arguments)
+        assertEquals("build", result["label"])
+        assertEquals("passing", result["message"])
+        assertEquals(listOf("https://jenkins.example/job/1"), result["links"])
+        assertFalse(result.containsKey("token"))
+    }
+
+    @Test
+    fun `badge upload uses the resolved commit and returns README URLs`() {
+        var uploaded: CnbBadgeUploadRequest? = null
+        val client =
+            client(
+                handlers =
+                    mapOf(
+                        "uploadBadge" to { args ->
+                            uploaded = args?.get(1) as CnbBadgeUploadRequest
+                            CnbBadgeUploadResult(
+                                url = "https://cnb.cool/team/project/-/badge/git/${"a".repeat(40)}/security/tca",
+                                latestUrl = "https://cnb.cool/team/project/-/badge/git/latest/security/tca",
+                            )
+                        },
+                    ),
+            )
+
+        val result =
+            CnbStepDispatcher.execute(
+                CnbStepRequest.UploadBadge(
+                    key = "security/tca",
+                    message = "passing",
+                    link = "https://jenkins.example/job/1",
+                    latest = true,
+                    value = 0,
+                ),
+                context,
+                client,
+            ) as Map<*, *>
+
+        assertEquals("a".repeat(40), uploaded?.sha)
+        assertEquals("security/tca", uploaded?.key)
+        assertEquals(0L, uploaded?.value)
+        assertEquals("https://cnb.cool/team/project/-/badge/git/latest/security/tca", result["latestUrl"])
+        assertFalse(result.containsKey("token"))
+    }
+
+    @Test
     fun `label mutation supports add replace and individual remove with stable results`() {
         val calls = mutableListOf<String>()
         val client =
@@ -475,6 +581,9 @@ class CnbPipelineStepsTest {
                 CnbStartBuildStep.DescriptorImpl(),
                 CnbBuildStatusStep.DescriptorImpl(),
                 CnbStopBuildStep.DescriptorImpl(),
+                CnbBadgesStep.DescriptorImpl(),
+                CnbBadgeStep.DescriptorImpl(),
+                CnbUploadBadgeStep.DescriptorImpl(),
             )
         assertEquals(
             listOf(
@@ -487,6 +596,9 @@ class CnbPipelineStepsTest {
                 "cnbStartBuild",
                 "cnbBuildStatus",
                 "cnbStopBuild",
+                "cnbBadges",
+                "cnbBadge",
+                "cnbUploadBadge",
             ),
             descriptors.map { it.functionName },
         )
@@ -496,6 +608,29 @@ class CnbPipelineStepsTest {
                     !it.takesImplicitBlockArgument()
             },
         )
+    }
+
+    @Test
+    fun `badge steps publish help for every Pipeline parameter`() {
+        val resources =
+            listOf(
+                "CnbBadgesStep/help.html",
+                "CnbBadgeStep/help.html",
+                "CnbBadgeStep/help-badge.html",
+                "CnbBadgeStep/help-revision.html",
+                "CnbBadgeStep/help-branch.html",
+                "CnbUploadBadgeStep/help.html",
+                "CnbUploadBadgeStep/help-key.html",
+                "CnbUploadBadgeStep/help-message.html",
+                "CnbUploadBadgeStep/help-link.html",
+                "CnbUploadBadgeStep/help-latest.html",
+                "CnbUploadBadgeStep/help-value.html",
+            )
+        val root = "dev/zxilly/jenkins/cnb/pipeline"
+
+        resources.forEach { resource ->
+            assertTrue(javaClass.classLoader.getResource("$root/$resource") != null, resource)
+        }
     }
 
     @Suppress("UNCHECKED_CAST")

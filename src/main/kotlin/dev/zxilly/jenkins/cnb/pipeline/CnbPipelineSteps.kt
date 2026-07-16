@@ -1,6 +1,7 @@
 package dev.zxilly.jenkins.cnb.pipeline
 
 import dev.zxilly.jenkins.cnb.api.CnbClient
+import dev.zxilly.jenkins.cnb.api.model.CnbBadgeUploadRequest
 import dev.zxilly.jenkins.cnb.api.model.CnbBuildEventName
 import dev.zxilly.jenkins.cnb.api.model.CnbBuildHistoryQuery
 import dev.zxilly.jenkins.cnb.api.model.CnbBuildNpc
@@ -610,6 +611,22 @@ internal sealed interface CnbStepRequest : Serializable {
     data object PullRequestReviews : CnbStepRequest
 
     data object CommitStatuses : CnbStepRequest
+
+    data object Badges : CnbStepRequest
+
+    data class Badge(
+        val badge: String,
+        val revision: String,
+        val branch: String?,
+    ) : CnbStepRequest
+
+    data class UploadBadge(
+        val key: String,
+        val message: String?,
+        val link: String,
+        val latest: Boolean,
+        val value: Long?,
+    ) : CnbStepRequest
 }
 
 private class CnbStepExecution(
@@ -638,7 +655,7 @@ internal object CnbStepDispatcher {
         request: CnbStepRequest,
         context: CnbRunContext,
         client: CnbClient,
-    ): Any =
+    ): Any? =
         when (request) {
             is CnbStepRequest.PullRequestComment -> {
                 if (!client.capabilities.supportsPullComments) {
@@ -859,6 +876,32 @@ internal object CnbStepDispatcher {
                         add(it.asPipelineValue())
                     }
                 }
+            }
+
+            CnbStepRequest.Badges -> {
+                CnbBadgePipelineValues.summaries(client.listBadges(context.repository))
+            }
+
+            is CnbStepRequest.Badge -> {
+                client
+                    .getBadge(context.repository, request.badge, request.revision, request.branch)
+                    ?.let(CnbBadgePipelineValues::badge)
+            }
+
+            is CnbStepRequest.UploadBadge -> {
+                CnbBadgePipelineValues.upload(
+                    client.uploadBadge(
+                        context.repository,
+                        CnbBadgeUploadRequest(
+                            key = request.key,
+                            sha = context.requireSha(),
+                            message = request.message,
+                            link = request.link,
+                            latest = request.latest,
+                            value = request.value,
+                        ),
+                    ),
+                )
             }
         }
 

@@ -123,6 +123,41 @@ class CnbPipelineStepsIntegrationTest {
                     respond(exchange, 200, """[{"context":"ci/jenkins","state":"success"}]""")
                 }
 
+                "/team/project/-/badge/list" -> {
+                    assertEquals("GET", exchange.requestMethod)
+                    respond(
+                        exchange,
+                        200,
+                        """[{"group":{"type":"Security","typeEn":"Security"},"type":"git","desc":"TCA","name":"security/tca","url":"/team/project/-/badge/git/latest/security/tca"}]""",
+                    )
+                }
+
+                "/team/project/-/badge/git/latest/security/tca.json" -> {
+                    assertEquals("GET", exchange.requestMethod)
+                    assertEquals(
+                        "{\"branch\":\"master\"}",
+                        exchange.requestBody.readAllBytes().toString(StandardCharsets.UTF_8),
+                    )
+                    respond(exchange, 200, """{"color":"green","label":"TCA","message":"passing","links":[]}""")
+                }
+
+                "/team/project/-/badge/upload" -> {
+                    assertEquals("POST", exchange.requestMethod)
+                    assertEquals(
+                        "{\"key\":\"security/tca\",\"latest\":true,\"message\":\"passing\",\"sha\":\"${"a".repeat(
+                            40,
+                        )}\",\"value\":0}",
+                        exchange.requestBody.readAllBytes().toString(StandardCharsets.UTF_8),
+                    )
+                    respond(
+                        exchange,
+                        200,
+                        """{"url":"/team/project/-/badge/git/${"a".repeat(
+                            40,
+                        )}/security/tca","latest_url":"/team/project/-/badge/git/latest/security/tca"}""",
+                    )
+                }
+
                 "/team/project/-/git/commit-annotations-in-batch" -> {
                     assertEquals("POST", exchange.requestMethod)
                     assertEquals(
@@ -185,6 +220,20 @@ class CnbPipelineStepsIntegrationTest {
                       serverId: 'local-cnb', repository: 'team/project', sha: '${"a".repeat(40)}'
                     )
                     if (statuses.size() != 1 || statuses[0].context != 'ci/jenkins') { error('unexpected statuses') }
+                    def badges = cnbBadges(serverId: 'local-cnb', repository: 'team/project')
+                    if (badges.size() != 1 || badges[0].name != 'security/tca') { error('unexpected badges') }
+                    def badge = cnbBadge(
+                      serverId: 'local-cnb', repository: 'team/project',
+                      badge: 'security/tca', revision: 'latest', branch: 'master'
+                    )
+                    if (badge.label != 'TCA' || badge.message != 'passing') { error('unexpected badge') }
+                    def uploadedBadge = cnbUploadBadge(
+                      serverId: 'local-cnb', repository: 'team/project', sha: '${"a".repeat(40)}',
+                      key: 'security/tca', message: 'passing', latest: true, value: 0
+                    )
+                    if (!uploadedBadge.latestUrl.endsWith('/badge/git/latest/security/tca')) {
+                      error('badge upload did not return a latest URL')
+                    }
                     def annotations = cnbCommitAnnotations(
                       serverId: 'local-cnb', repository: 'team/project',
                       commitHashes: ['${"a".repeat(40)}'], keys: ['jenkins_state']
@@ -215,7 +264,7 @@ class CnbPipelineStepsIntegrationTest {
                 )
 
             jenkins.buildAndAssertSuccess(job)
-            assertEquals(15, requests.size)
+            assertEquals(18, requests.size)
             assertEquals(4, requests.count { it == "GET /team/project/-/pulls/42" })
         } finally {
             server.stop(0)
