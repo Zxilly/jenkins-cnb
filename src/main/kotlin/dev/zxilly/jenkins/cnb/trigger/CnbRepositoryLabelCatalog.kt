@@ -6,6 +6,7 @@ import hudson.init.Terminator
 import java.time.Duration
 import java.util.LinkedHashMap
 import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.CancellationException
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.FutureTask
@@ -95,6 +96,8 @@ internal class CnbCachingRepositoryLabelCatalog(
             (executor as? ThreadPoolExecutor)?.purge()
             CnbRepositoryLabelCatalogResult.Unavailable
         } catch (_: ExecutionException) {
+            CnbRepositoryLabelCatalogResult.Unavailable
+        } catch (_: CancellationException) {
             CnbRepositoryLabelCatalogResult.Unavailable
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()

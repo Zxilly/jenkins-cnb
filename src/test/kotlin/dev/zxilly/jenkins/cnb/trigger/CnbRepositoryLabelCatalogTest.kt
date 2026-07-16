@@ -2,7 +2,9 @@ package dev.zxilly.jenkins.cnb.trigger
 
 import dev.zxilly.jenkins.cnb.api.model.CnbLabel
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertInstanceOf
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.time.Duration
 import java.util.concurrent.CountDownLatch
@@ -68,6 +70,39 @@ class CnbRepositoryLabelCatalogTest {
         } finally {
             blocker.countDown()
             catalog.close()
+        }
+    }
+
+    @Test
+    fun `shared lookup cancellation is unavailable to every waiter`() {
+        val loaderStarted = CountDownLatch(1)
+        val releaseLoader = CountDownLatch(1)
+        val catalogExecutor = Executors.newSingleThreadExecutor()
+        val callers = Executors.newFixedThreadPool(2)
+        val catalog =
+            CnbCachingRepositoryLabelCatalog(
+                loadLabels = { _, _ ->
+                    loaderStarted.countDown()
+                    releaseLoader.await()
+                    emptyList()
+                },
+                executor = catalogExecutor,
+                timeout = Duration.ofMillis(500),
+            )
+
+        try {
+            val first = callers.submit<CnbRepositoryLabelCatalogResult> { catalog.lookup("primary", "team/repo") }
+            assertTrue(loaderStarted.await(1, TimeUnit.SECONDS))
+            Thread.sleep(100)
+            assertFalse(first.isDone)
+            val second = callers.submit<CnbRepositoryLabelCatalogResult> { catalog.lookup("primary", "team/repo") }
+
+            assertEquals(CnbRepositoryLabelCatalogResult.Unavailable, first.get(1, TimeUnit.SECONDS))
+            assertEquals(CnbRepositoryLabelCatalogResult.Unavailable, second.get(1, TimeUnit.SECONDS))
+        } finally {
+            releaseLoader.countDown()
+            catalog.close()
+            callers.shutdownNow()
         }
     }
 }
