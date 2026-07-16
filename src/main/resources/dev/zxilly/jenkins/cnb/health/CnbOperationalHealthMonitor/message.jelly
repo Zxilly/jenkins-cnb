@@ -1,0 +1,7 @@
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core">
+  <div class="alert alert-warning">
+    <span>${%recentFailures}</span>
+    <a href="${rootURL}/manage/cnb-health">${%viewHealth}</a>
+  </div>
+</j:jelly>
