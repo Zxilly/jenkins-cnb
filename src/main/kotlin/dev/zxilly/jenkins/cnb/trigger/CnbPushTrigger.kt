@@ -242,32 +242,39 @@ class CnbPushTrigger
 
         internal fun scheduleVerified(delivery: CnbWebhookDelivery): Boolean {
             val target = job ?: return false
-            // Recheck mutable Jenkins state after the dispatcher's API preflight, but never perform
-            // network I/O here: all matching jobs must be validated before any one is scheduled.
-            if (!target.isBuildable || !matches(delivery)) return false
             val queueIdentity = CnbQueueIdentity.from(delivery) ?: return false
-            if (isCancelPendingBuildsOnUpdate()) {
-                val queueTask = target as? Queue.Task ?: return false
-                CnbPendingBuilds.cancelSuperseded(Queue.getInstance(), queueTask, queueIdentity)
-            }
-            val queued =
-                ParameterizedJobMixIn.scheduleBuild2(
-                    target,
-                    0,
-                    CauseAction(CnbPushCause.from(delivery)),
-                    CnbQueueAction(queueIdentity),
-                )
-            if (queued != null && shouldCancelRunningBuildsFor(delivery)) {
+            var queued = false
+            Queue.withLock(
+                Runnable {
+                    // Recheck mutable Jenkins state after the dispatcher's API preflight, but never
+                    // perform network I/O here: all matching jobs must be validated before any one
+                    // is scheduled. The lock also makes supersession and replacement atomic with
+                    // respect to Jenkins queue maintenance.
+                    if (!target.isBuildable || !matches(delivery)) return@Runnable
+                    if (isCancelPendingBuildsOnUpdate()) {
+                        val queueTask = target as? Queue.Task ?: return@Runnable
+                        CnbPendingBuilds.cancelSuperseded(Queue.getInstance(), queueTask, queueIdentity)
+                    }
+                    queued =
+                        ParameterizedJobMixIn.scheduleBuild2(
+                            target,
+                            0,
+                            CauseAction(CnbPushCause.from(delivery)),
+                            CnbQueueAction(queueIdentity),
+                        ) != null
+                },
+            )
+            if (queued && shouldCancelRunningBuildsFor(delivery)) {
                 CnbRunningBuilds.cancelSuperseded(target, queueIdentity)
             }
-            if (queued != null) {
+            if (queued) {
                 LOGGER.log(
                     Level.FINE,
                     "Scheduled {0} for CNB delivery {1}",
                     arrayOf(target.fullName, delivery.payload.deliveryId),
                 )
             }
-            return queued != null
+            return queued
         }
 
         /**
