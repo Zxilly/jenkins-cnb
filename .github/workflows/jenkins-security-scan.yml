@@ -1,0 +1,92 @@
+name: Jenkins Security Scan
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    types: [opened, synchronize, reopened]
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  security-events: write
+  contents: read
+  actions: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out plugin
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Java
+        uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+
+      # CodeQL 2.26.0 is the current stable bundle. Pin both its version and digest so the
+      # analysis toolchain is reproducible and does not silently move ahead of validation.
+      - name: Fetch verified CodeQL 2.26.0
+        shell: bash
+        run: |
+          curl -fsSL --retry 5 --retry-all-errors \
+            https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.26.0/codeql-bundle-linux64.tar.zst \
+            -o "$RUNNER_TEMP/codeql-bundle-linux64.tar.zst"
+          echo 'eeaaffa28291513a11565654d9828bac39d9234375a6fc0cd698f61c6d007bae  '"$RUNNER_TEMP/codeql-bundle-linux64.tar.zst" \
+            | sha256sum -c --strict
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
+        with:
+          languages: java
+          build-mode: manual
+          tools: ${{ runner.temp }}/codeql-bundle-linux64.tar.zst
+          config: |
+            disable-default-queries: true
+            packs:
+              - jenkins-infra/jenkins-codeql@0.0.3
+              - codeql/java-queries:AlertSuppression.ql
+              - codeql/java-queries:AlertSuppressionAnnotations.ql
+
+      # Stable CodeQL currently supports Kotlin <2.4.10. This one analysis-only build compiles
+      # the same production sources with 2.4.0 so the Kotlin extractor runs; release artifacts and
+      # every normal build remain on 2.4.10. Remove the profile once github/codeql#22194 ships.
+      - name: Trace production Kotlin sources
+        run: ./mvnw -B -ntp -V -Pcodeql-kotlin-compat -DskipTests clean package
+
+      - name: Run CodeQL
+        id: generate-sarif
+        uses: github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
+        with:
+          category: Jenkins Security Scan
+          upload: failure-only
+
+      - name: Process SARIF
+        shell: bash
+        run: |
+          jq 'setpath(path(.runs[].tool.driver.name); "Jenkins Security Scan") | setpath(path(.runs[].tool.driver.organization); "Jenkins Project") | del(.runs[].results[] | select( .suppressions | length != 0 ))' ../results/java.sarif > jenkins-security-scan.sarif
+          mv -v ../results/java.sarif .
+
+      - name: Archive SARIF
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          path: "*.sarif"
+          name: Jenkins Security Scan SARIF
+          if-no-files-found: error
+
+      - name: Upload scan result
+        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
+        with:
+          sarif_file: jenkins-security-scan.sarif
+          category: Jenkins Security Scan

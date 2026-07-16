@@ -1,0 +1,82 @@
+name: Update Release Draft
+
+on:
+  push:
+    branches: [master]
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-drafter-${{ github.event.pull_request.number || 'draft' }}
+  cancel-in-progress: true
+
+jobs:
+  labels:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Synchronize Conventional Commit labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_HEAD: ${{ github.event.pull_request.head.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        shell: bash
+        run: |
+          conventional='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9._/-]+\))?(!)?: .+'
+          breaking='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9._/-]+\))?!:'
+          feature='^feat(\([a-z0-9._/-]+\))?!?:'
+          fix='^(fix|perf)(\([a-z0-9._/-]+\))?!?:'
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          managed=(breaking feature fix maintenance dependencies)
+          current="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json labels --jq '.labels[].name')"
+          for label in "${managed[@]}"; do
+            if grep -Fxq "$label" <<<"$current"; then
+              gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --remove-label "$label"
+            fi
+          done
+
+          if [[ ! "$PR_TITLE" =~ $conventional ]]; then
+            echo 'Pull request titles must follow Conventional Commits.' >&2
+            exit 1
+          fi
+
+          labels=()
+          if [[ "$PR_TITLE" =~ $breaking ]]; then
+            labels+=(breaking)
+          fi
+          if [[ "$PR_TITLE" =~ $feature ]]; then
+            labels+=(feature)
+          elif [[ "$PR_TITLE" =~ $fix ]]; then
+            labels+=(fix)
+          else
+            labels+=(maintenance)
+          fi
+          if [[ "$PR_HEAD" == dependabot/* ]]; then
+            labels+=(dependencies)
+          fi
+
+          joined="$(IFS=,; echo "${labels[*]}")"
+          gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --add-label "$joined"
+
+  draft:
+    if: github.event_name != 'pull_request_target'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Update draft release
+        uses: release-drafter/release-drafter@4d75298e00d9e34c483e5ff8c68d0ea1c1940c1e # v7.5.1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

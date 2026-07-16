@@ -1,0 +1,158 @@
+name: Release HPI
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+      - name: Validate release tag and source branch
+        env:
+          VERSION: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          identifier='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+          pattern="^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(${identifier})(\\.${identifier})*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$"
+          if [[ ! "$VERSION" =~ $pattern ]]; then
+            echo 'Release tags must follow SemVer 2.0.0, for example v1.2.3, v1.2.3-rc.1, or v1.2.3+build.7.' >&2
+            exit 1
+          fi
+          git fetch --no-tags origin master:refs/remotes/origin/master
+          tag_commit="$(git rev-list -n 1 "$VERSION")"
+          git merge-base --is-ancestor "$tag_commit" origin/master
+          echo "TAG_COMMIT=$tag_commit" >> "$GITHUB_ENV"
+      - name: Build release
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: >-
+          ./mvnw -B -ntp
+          -Drevision="${VERSION#v}"
+          -Dchangelist=
+          -DscmTag="$VERSION"
+          clean verify
+      - name: Verify HPI identity and bundled libraries
+        env:
+          VERSION: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          unzip -p target/cnb.hpi META-INF/MANIFEST.MF \
+            | tr -d '\r' > "$RUNNER_TEMP/cnb-manifest.mf"
+          grep -Fx 'Short-Name: cnb' "$RUNNER_TEMP/cnb-manifest.mf"
+          grep -Fx "Plugin-Version: ${VERSION#v}" "$RUNNER_TEMP/cnb-manifest.mf"
+          grep -Fx 'Jenkins-Version: 2.568.1' "$RUNNER_TEMP/cnb-manifest.mf"
+          grep -Fx 'Java-Version: 21' "$RUNNER_TEMP/cnb-manifest.mf"
+          grep -Fx "Plugin-ScmTag: $VERSION" "$RUNNER_TEMP/cnb-manifest.mf"
+          grep -Fx "Implementation-Build: $TAG_COMMIT" "$RUNNER_TEMP/cnb-manifest.mf"
+
+          unzip -Z1 target/cnb.hpi \
+            | grep '^WEB-INF/lib/[^/]*$' \
+            | LC_ALL=C sort > "$RUNNER_TEMP/cnb-libraries.txt"
+          cat > "$RUNNER_TEMP/expected-libraries.txt" <<'EOF'
+          WEB-INF/lib/annotations-13.0.jar
+          WEB-INF/lib/cnb.jar
+          WEB-INF/lib/httpclient5-5.6.2.jar
+          WEB-INF/lib/httpcore5-5.4.3.jar
+          WEB-INF/lib/httpcore5-h2-5.4.3.jar
+          WEB-INF/lib/kotlin-stdlib-2.4.10.jar
+          WEB-INF/lib/kotlinx-serialization-core-jvm-1.11.0.jar
+          WEB-INF/lib/kotlinx-serialization-json-jvm-1.11.0.jar
+          WEB-INF/lib/re2j-1.8.jar
+          EOF
+          diff -u "$RUNNER_TEMP/expected-libraries.txt" "$RUNNER_TEMP/cnb-libraries.txt"
+      - name: Create checksum
+        working-directory: target
+        run: sha256sum cnb.hpi > cnb.hpi.sha256
+      - name: Stage release artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: cnb-release-${{ github.sha }}
+          path: |
+            target/cnb.hpi
+            target/cnb.hpi.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      attestations: write
+      contents: write
+      id-token: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Refuse an existing published release
+        shell: bash
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = true || {
+              echo 'A published release already exists for this tag.' >&2
+              exit 1
+            }
+          fi
+      - name: Download release artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cnb-release-${{ github.sha }}
+          path: target
+      - name: Verify checksum
+        working-directory: target
+        run: sha256sum -c cnb.hpi.sha256
+      - name: Attest release provenance
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4
+        with:
+          subject-path: target/cnb.hpi
+      - name: Publish GitHub release
+        shell: bash
+        run: |
+          release_version="${GITHUB_REF_NAME#v}"
+          version_without_build="${release_version%%+*}"
+          release_flags=(--draft=false --title "$GITHUB_REF_NAME" --verify-tag)
+          create_flags=(--title "$GITHUB_REF_NAME" --verify-tag --generate-notes)
+          if [[ "$version_without_build" == *-* ]]; then
+            release_flags+=(--prerelease --latest=false)
+            create_flags+=(--prerelease --latest=false)
+          else
+            release_flags+=(--prerelease=false)
+          fi
+
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = true || {
+              echo 'Refusing to replace assets on an existing published release.' >&2
+              exit 1
+            }
+            gh release upload "$GITHUB_REF_NAME" target/cnb.hpi target/cnb.hpi.sha256 --clobber
+            printf '%s\n' cnb.hpi cnb.hpi.sha256 | LC_ALL=C sort > "$RUNNER_TEMP/expected-assets.txt"
+            gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' \
+              | LC_ALL=C sort > "$RUNNER_TEMP/actual-assets.txt"
+            diff -u "$RUNNER_TEMP/expected-assets.txt" "$RUNNER_TEMP/actual-assets.txt"
+            gh release edit "$GITHUB_REF_NAME" "${release_flags[@]}"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              target/cnb.hpi \
+              target/cnb.hpi.sha256 \
+              "${create_flags[@]}"
+          fi

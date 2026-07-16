@@ -1,0 +1,33 @@
+name-template: "v$RESOLVED_VERSION"
+tag-template: "v$RESOLVED_VERSION"
+references:
+  - master
+categories:
+  - title: Breaking changes
+    exclusive: true
+    semver-increment: major
+    when:
+      label: breaking
+  - title: Features
+    exclusive: true
+    semver-increment: minor
+    when:
+      label: feature
+  - title: Fixes
+    exclusive: true
+    semver-increment: patch
+    when:
+      label: fix
+  - title: Maintenance
+    exclusive: true
+    semver-increment: patch
+    when:
+      labels: [dependencies, maintenance]
+  - title: Other changes
+    semver-increment: patch
+change-template: "- $TITLE @$AUTHOR (#$NUMBER)"
+change-title-escapes: '\<*_&`#@'
+template: |
+  ## Changes
+
+  $CHANGES
