@@ -1,0 +1,5 @@
+<div>
+  使用 CNB 的 merge、squash 或 rebase 策略合并拉取请求。CNB 返回未合并时，该步骤会使 Pipeline 失败。
+  合并前 Jenkins 会要求 CNB 当前拉取请求源 SHA 与本次构建的完整 SHA 相同。CNB API 不提供原子的 expected-SHA/CAS
+  合并条件，因此预检只能缩小、不能消除极短的 TOCTOU 竞态；必须继续启用 CNB 合并规则作为最终保护。
+</div>

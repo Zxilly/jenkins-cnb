@@ -1,0 +1,5 @@
+<div>
+  向当前 CNB 拉取请求提交 <code>approve</code>、<code>comment</code> 或 <code>request_changes</code> 评审。成功返回 <code>true</code>。
+  approve、request_changes 以及包含文件/行内评论的 comment 会先校验当前源 SHA；不含行内评论的纯 review comment 不绑定 SHA。
+  CNB API 不提供原子的 expected-SHA/CAS 写入条件，因此预检只能缩小、不能消除极短的 TOCTOU 竞态；仍应启用 CNB 的拉取请求保护和合并规则。
+</div>
