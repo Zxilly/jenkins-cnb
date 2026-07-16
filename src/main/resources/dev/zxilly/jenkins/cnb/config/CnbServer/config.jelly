@@ -1,0 +1,55 @@
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core" xmlns:f="/lib/form">
+  <f:entry title="ID" field="id">
+    <f:textbox />
+  </f:entry>
+  <f:entry title="Name" field="name">
+    <f:textbox />
+  </f:entry>
+  <f:entry title="Web URL" field="webUrl">
+    <f:textbox />
+  </f:entry>
+  <f:entry title="API URL" field="apiUrl">
+    <f:textbox />
+  </f:entry>
+  <f:entry title="API credentials" field="credentialsId">
+    <f:select />
+  </f:entry>
+  <f:entry title="Result-reporting credentials" field="reportingCredentialsId">
+    <f:select />
+  </f:entry>
+  <f:entry title="Repository webhook secrets" field="webhookCredentials">
+    <f:repeatableProperty field="webhookCredentials" />
+  </f:entry>
+  <f:entry title="Allow insecure HTTP" field="allowInsecureHttp">
+    <f:checkbox />
+  </f:entry>
+  <f:entry title="Allow private network endpoints" field="allowPrivateNetwork">
+    <f:checkbox />
+  </f:entry>
+  <f:entry title="Enable repository event polling" field="eventPollingEnabled">
+    <f:checkbox />
+  </f:entry>
+  <f:entry title="Polling interval (seconds)" field="eventPollingIntervalSeconds">
+    <f:number min="60" max="3600" />
+  </f:entry>
+  <f:entry title="Maximum webhook age (seconds)" field="maxWebhookAgeSeconds">
+    <f:number min="60" max="3600" />
+  </f:entry>
+  <f:entry title="Connect timeout (seconds)" field="connectTimeoutSeconds">
+    <f:number min="1" max="120" />
+  </f:entry>
+  <f:entry title="Request timeout (seconds)" field="requestTimeoutSeconds">
+    <f:number min="1" max="600" />
+  </f:entry>
+  <f:entry title="Build result reporting" field="statusReportingMode">
+    <f:select />
+  </f:entry>
+  <f:entry>
+    <f:validateButton
+        title="Test scan/API credential"
+        progress="Testing..."
+        method="testConnection"
+        with="webUrl,apiUrl,credentialsId,allowInsecureHttp,allowPrivateNetwork,connectTimeoutSeconds,requestTimeoutSeconds" />
+  </f:entry>
+</j:jelly>
