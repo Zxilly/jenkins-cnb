@@ -2,12 +2,16 @@ package dev.zxilly.jenkins.cnb.scm
 
 import dev.zxilly.jenkins.cnb.config.CnbGlobalConfiguration
 import dev.zxilly.jenkins.cnb.config.CnbServer
+import dev.zxilly.jenkins.cnb.trigger.CnbRepositoryLabelCatalogResult
+import dev.zxilly.jenkins.cnb.trigger.CnbRepositoryLabelLookup
+import dev.zxilly.jenkins.cnb.trigger.CnbRepositoryLabelLookupRequest
 import hudson.util.FormValidation
 import jenkins.scm.api.SCMHeadOrigin
 import jenkins.scm.api.mixin.ChangeRequestCheckoutStrategy
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertInstanceOf
+import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -94,6 +98,40 @@ class CnbSCMDescriptorsCoverageTest {
         assertEquals(
             FormValidation.Kind.OK,
             descriptor.doCheckCheckoutCredentialsId(null, "primary", null, null).kind,
+        )
+    }
+
+    @Test
+    fun `pull request filter labels use the source credential and item context`(jenkins: JenkinsRule) {
+        var observed: CnbRepositoryLabelLookupRequest? = null
+        val descriptor =
+            CnbPullRequestFilterTrait.DescriptorImpl(
+                CnbRepositoryLabelLookup { request ->
+                    observed = request
+                    CnbRepositoryLabelCatalogResult.Available(listOf("ready", "release", "skip"), complete = true)
+                },
+            )
+        val project = jenkins.createFreeStyleProject("source-labels")
+
+        assertEquals(
+            listOf("ready", "release"),
+            descriptor
+                .doAutoCompleteRequiredLabels(project, "primary", "team/repo", "source-api", "ready, re")
+                .values,
+        )
+        assertEquals("source-api", observed?.credentialsId)
+        assertSame(project, observed?.context)
+        assertEquals(
+            FormValidation.Kind.OK,
+            descriptor.doCheckRequiredLabels(project, "ready", "skip", "primary", "team/repo", "source-api").kind,
+        )
+        assertEquals(
+            FormValidation.Kind.WARNING,
+            descriptor.doCheckExcludedLabels(project, "missing", "ready", "primary", "team/repo", "source-api").kind,
+        )
+        assertEquals(
+            FormValidation.Kind.ERROR,
+            descriptor.doCheckRequiredLabels(project, "ready", "ready", "primary", "team/repo", "source-api").kind,
         )
     }
 

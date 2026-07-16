@@ -1,7 +1,13 @@
 package dev.zxilly.jenkins.cnb.scm
 
 import dev.zxilly.jenkins.cnb.api.model.CnbPullRequest
+import dev.zxilly.jenkins.cnb.trigger.CnbRepositoryLabelCatalogRuntime
+import dev.zxilly.jenkins.cnb.trigger.CnbRepositoryLabelFormSupport
+import dev.zxilly.jenkins.cnb.trigger.CnbRepositoryLabelLookup
 import hudson.Extension
+import hudson.model.AutoCompletionCandidates
+import hudson.model.Item
+import hudson.util.FormValidation
 import hudson.util.ListBoxModel
 import jenkins.scm.api.SCMHead
 import jenkins.scm.api.SCMHeadOrigin
@@ -12,7 +18,10 @@ import jenkins.scm.api.trait.SCMSourceContext
 import jenkins.scm.api.trait.SCMSourceTrait
 import jenkins.scm.api.trait.SCMSourceTraitDescriptor
 import org.jenkinsci.Symbol
+import org.kohsuke.stapler.AncestorInPath
 import org.kohsuke.stapler.DataBoundConstructor
+import org.kohsuke.stapler.QueryParameter
+import org.kohsuke.stapler.verb.POST
 
 /** Filters discovered CNB branches by their protected and locked properties. */
 class CnbBranchPropertyFilterTrait
@@ -101,12 +110,78 @@ class CnbPullRequestFilterTrait
 
         @Extension
         @Symbol("cnbPullRequestFilter")
-        class DescriptorImpl : SCMSourceTraitDescriptor() {
+        class DescriptorImpl : SCMSourceTraitDescriptor {
+            private val repositoryLabelForm: CnbRepositoryLabelFormSupport
+
+            constructor() : super() {
+                repositoryLabelForm = CnbRepositoryLabelFormSupport(CnbRepositoryLabelCatalogRuntime)
+            }
+
+            internal constructor(repositoryLabelLookup: CnbRepositoryLabelLookup) : super() {
+                repositoryLabelForm = CnbRepositoryLabelFormSupport(repositoryLabelLookup)
+            }
+
             override fun getDisplayName(): String = "Filter CNB pull requests"
 
             override fun getContextClass(): Class<out SCMSourceContext<*, *>> = CnbSCMSourceContext::class.java
 
             override fun getSourceClass(): Class<out SCMSource> = CnbSCMSource::class.java
+
+            @POST
+            fun doAutoCompleteRequiredLabels(
+                @AncestorInPath item: Item?,
+                @QueryParameter serverId: String?,
+                @QueryParameter repositoryPath: String?,
+                @QueryParameter apiCredentialsId: String?,
+                @QueryParameter value: String?,
+            ): AutoCompletionCandidates = repositoryLabelForm.autocomplete(item, serverId, repositoryPath, apiCredentialsId, value)
+
+            @POST
+            fun doAutoCompleteExcludedLabels(
+                @AncestorInPath item: Item?,
+                @QueryParameter serverId: String?,
+                @QueryParameter repositoryPath: String?,
+                @QueryParameter apiCredentialsId: String?,
+                @QueryParameter value: String?,
+            ): AutoCompletionCandidates = repositoryLabelForm.autocomplete(item, serverId, repositoryPath, apiCredentialsId, value)
+
+            @POST
+            fun doCheckRequiredLabels(
+                @AncestorInPath item: Item?,
+                @QueryParameter value: String?,
+                @QueryParameter excludedLabels: String?,
+                @QueryParameter serverId: String?,
+                @QueryParameter repositoryPath: String?,
+                @QueryParameter apiCredentialsId: String?,
+            ): FormValidation =
+                repositoryLabelForm.validate(
+                    item,
+                    value,
+                    excludedLabels,
+                    serverId,
+                    repositoryPath,
+                    apiCredentialsId,
+                    validateRequired = true,
+                )
+
+            @POST
+            fun doCheckExcludedLabels(
+                @AncestorInPath item: Item?,
+                @QueryParameter value: String?,
+                @QueryParameter requiredLabels: String?,
+                @QueryParameter serverId: String?,
+                @QueryParameter repositoryPath: String?,
+                @QueryParameter apiCredentialsId: String?,
+            ): FormValidation =
+                repositoryLabelForm.validate(
+                    item,
+                    requiredLabels,
+                    value,
+                    serverId,
+                    repositoryPath,
+                    apiCredentialsId,
+                    validateRequired = false,
+                )
         }
 
         private class Filter(

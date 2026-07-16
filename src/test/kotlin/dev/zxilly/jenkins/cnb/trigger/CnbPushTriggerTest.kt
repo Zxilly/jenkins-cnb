@@ -40,7 +40,7 @@ class CnbPushTriggerTest {
             CnbRepositoryLabelCatalogResult.Available(listOf("ready", "release", "security-reviewed"), complete = true)
         val descriptor =
             CnbPushTrigger.DescriptorImpl(
-                CnbRepositoryLabelLookup { _, _ ->
+                CnbRepositoryLabelLookup { _ ->
                     calls.incrementAndGet()
                     catalog
                 },

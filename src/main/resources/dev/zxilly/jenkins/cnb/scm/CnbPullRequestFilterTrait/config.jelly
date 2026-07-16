@@ -1,18 +1,20 @@
 <?jelly escape-by-default='true'?>
 <j:jelly xmlns:j="jelly:core" xmlns:f="/lib/form">
-  <f:entry title="Include draft/WIP pull requests" field="includeDrafts">
+  <f:entry title="${%Include draft/WIP pull requests}" field="includeDrafts">
     <f:checkbox default="false"/>
   </f:entry>
-  <f:entry title="Source branch glob" field="sourceBranchFilter">
+  <f:entry title="${%Source branch glob}" field="sourceBranchFilter">
     <f:textbox default="**"/>
   </f:entry>
-  <f:entry title="Target branch glob" field="targetBranchFilter">
+  <f:entry title="${%Target branch glob}" field="targetBranchFilter">
     <f:textbox default="**"/>
   </f:entry>
-  <f:entry title="Required labels" field="requiredLabels">
-    <f:textbox/>
+  <f:entry title="${%Required labels}" field="requiredLabels">
+    <f:textbox autoCompleteDelimChar="," fillDependsOn="serverId repositoryPath apiCredentialsId"
+               checkDependsOn="serverId repositoryPath apiCredentialsId excludedLabels"/>
   </f:entry>
-  <f:entry title="Excluded labels" field="excludedLabels">
-    <f:textbox/>
+  <f:entry title="${%Excluded labels}" field="excludedLabels">
+    <f:textbox autoCompleteDelimChar="," fillDependsOn="serverId repositoryPath apiCredentialsId"
+               checkDependsOn="serverId repositoryPath apiCredentialsId requiredLabels"/>
   </f:entry>
 </j:jelly>

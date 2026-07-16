@@ -20,7 +20,7 @@ class CnbRepositoryLabelCatalogTest {
         val executor = Executors.newSingleThreadExecutor()
         val catalog =
             CnbCachingRepositoryLabelCatalog(
-                loadLabels = { _, _ ->
+                loadLabels = { _ ->
                     calls.incrementAndGet()
                     (1..510).map { index -> CnbLabel("label-$index", "label-$index") }
                 },
@@ -31,17 +31,20 @@ class CnbRepositoryLabelCatalogTest {
             )
 
         try {
-            val first = assertInstanceOf(CnbRepositoryLabelCatalogResult.Available::class.java, catalog.lookup("primary", "team/repo"))
-            val cached = assertInstanceOf(CnbRepositoryLabelCatalogResult.Available::class.java, catalog.lookup("primary", "team/repo"))
+            val first = assertInstanceOf(CnbRepositoryLabelCatalogResult.Available::class.java, catalog.lookup(request()))
+            val cached = assertInstanceOf(CnbRepositoryLabelCatalogResult.Available::class.java, catalog.lookup(request()))
 
             assertEquals(500, first.labels.size)
             assertEquals(false, first.complete)
             assertEquals(first, cached)
             assertEquals(1, calls.get())
 
-            now = TimeUnit.SECONDS.toNanos(61)
-            catalog.lookup("primary", "team/repo")
+            catalog.lookup(request(credentialsId = "source-api"))
             assertEquals(2, calls.get())
+
+            now = TimeUnit.SECONDS.toNanos(61)
+            catalog.lookup(request())
+            assertEquals(3, calls.get())
         } finally {
             catalog.close()
         }
@@ -54,7 +57,7 @@ class CnbRepositoryLabelCatalogTest {
         val executor = Executors.newSingleThreadExecutor()
         val catalog =
             CnbCachingRepositoryLabelCatalog(
-                loadLabels = { _, _ ->
+                loadLabels = { _ ->
                     if (calls.incrementAndGet() == 1) error("secret response body")
                     blocker.await()
                     emptyList()
@@ -64,8 +67,8 @@ class CnbRepositoryLabelCatalogTest {
             )
 
         try {
-            assertEquals(CnbRepositoryLabelCatalogResult.Unavailable, catalog.lookup("primary", "team/repo"))
-            assertEquals(CnbRepositoryLabelCatalogResult.Unavailable, catalog.lookup("primary", "team/repo"))
+            assertEquals(CnbRepositoryLabelCatalogResult.Unavailable, catalog.lookup(request()))
+            assertEquals(CnbRepositoryLabelCatalogResult.Unavailable, catalog.lookup(request()))
             assertEquals(2, calls.get())
         } finally {
             blocker.countDown()
@@ -81,7 +84,7 @@ class CnbRepositoryLabelCatalogTest {
         val callers = Executors.newFixedThreadPool(2)
         val catalog =
             CnbCachingRepositoryLabelCatalog(
-                loadLabels = { _, _ ->
+                loadLabels = { _ ->
                     loaderStarted.countDown()
                     releaseLoader.await()
                     emptyList()
@@ -91,11 +94,11 @@ class CnbRepositoryLabelCatalogTest {
             )
 
         try {
-            val first = callers.submit<CnbRepositoryLabelCatalogResult> { catalog.lookup("primary", "team/repo") }
+            val first = callers.submit<CnbRepositoryLabelCatalogResult> { catalog.lookup(request()) }
             assertTrue(loaderStarted.await(1, TimeUnit.SECONDS))
             Thread.sleep(100)
             assertFalse(first.isDone)
-            val second = callers.submit<CnbRepositoryLabelCatalogResult> { catalog.lookup("primary", "team/repo") }
+            val second = callers.submit<CnbRepositoryLabelCatalogResult> { catalog.lookup(request()) }
 
             assertEquals(CnbRepositoryLabelCatalogResult.Unavailable, first.get(1, TimeUnit.SECONDS))
             assertEquals(CnbRepositoryLabelCatalogResult.Unavailable, second.get(1, TimeUnit.SECONDS))
@@ -105,4 +108,7 @@ class CnbRepositoryLabelCatalogTest {
             callers.shutdownNow()
         }
     }
+
+    private fun request(credentialsId: String? = null): CnbRepositoryLabelLookupRequest =
+        CnbRepositoryLabelLookupRequest("primary", "team/repo", credentialsId)
 }

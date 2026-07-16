@@ -3,6 +3,7 @@ package dev.zxilly.jenkins.cnb.trigger
 import dev.zxilly.jenkins.cnb.api.CnbClientFactory
 import dev.zxilly.jenkins.cnb.api.model.CnbLabel
 import hudson.init.Terminator
+import hudson.model.Item
 import java.time.Duration
 import java.util.LinkedHashMap
 import java.util.concurrent.ArrayBlockingQueue
@@ -30,15 +31,19 @@ internal sealed interface CnbRepositoryLabelCatalogResult {
 }
 
 internal fun interface CnbRepositoryLabelLookup {
-    fun lookup(
-        serverId: String,
-        repositoryPath: String,
-    ): CnbRepositoryLabelCatalogResult
+    fun lookup(request: CnbRepositoryLabelLookupRequest): CnbRepositoryLabelCatalogResult
 }
+
+internal data class CnbRepositoryLabelLookupRequest(
+    val serverId: String,
+    val repositoryPath: String,
+    val credentialsId: String? = null,
+    val context: Item? = null,
+)
 
 /** Bounded, single-flight label catalog for latency-sensitive Jenkins configuration forms. */
 internal class CnbCachingRepositoryLabelCatalog(
-    private val loadLabels: (String, String) -> List<CnbLabel>,
+    private val loadLabels: (CnbRepositoryLabelLookupRequest) -> List<CnbLabel>,
     private val executor: ExecutorService = newExecutor(),
     private val timeout: Duration = Duration.ofSeconds(5),
     private val ttl: Duration = Duration.ofSeconds(60),
@@ -48,6 +53,8 @@ internal class CnbCachingRepositoryLabelCatalog(
     private data class Key(
         val serverId: String,
         val repositoryPath: String,
+        val credentialsId: String,
+        val contextFullName: String,
     )
 
     private data class CacheEntry(
@@ -60,12 +67,21 @@ internal class CnbCachingRepositoryLabelCatalog(
     private val inFlight = HashMap<Key, FutureTask<CnbRepositoryLabelCatalogResult>>()
     private val closed = AtomicBoolean()
 
-    override fun lookup(
-        serverId: String,
-        repositoryPath: String,
-    ): CnbRepositoryLabelCatalogResult {
+    override fun lookup(request: CnbRepositoryLabelLookupRequest): CnbRepositoryLabelCatalogResult {
         if (closed.get()) return CnbRepositoryLabelCatalogResult.Unavailable
-        val key = Key(serverId, repositoryPath)
+        val normalized =
+            request.copy(
+                serverId = request.serverId.trim(),
+                repositoryPath = request.repositoryPath.trim().trim('/'),
+                credentialsId = request.credentialsId?.trim()?.takeIf(String::isNotEmpty),
+            )
+        val key =
+            Key(
+                normalized.serverId,
+                normalized.repositoryPath,
+                normalized.credentialsId.orEmpty(),
+                normalized.context?.fullName.orEmpty(),
+            )
         val now = nowNanos()
         var created = false
         val future =
@@ -75,7 +91,7 @@ internal class CnbCachingRepositoryLabelCatalog(
                     ?.let { entry -> return entry.value }
                 cache.remove(key)
                 inFlight[key]
-                    ?: FutureTask { load(key) }.also { task ->
+                    ?: FutureTask { load(key, normalized) }.also { task ->
                         inFlight[key] = task
                         created = true
                     }
@@ -109,11 +125,14 @@ internal class CnbCachingRepositoryLabelCatalog(
         }
     }
 
-    private fun load(key: Key): CnbRepositoryLabelCatalogResult {
+    private fun load(
+        key: Key,
+        request: CnbRepositoryLabelLookupRequest,
+    ): CnbRepositoryLabelCatalogResult {
         val result =
             try {
                 val names = linkedSetOf<String>()
-                for (label in loadLabels(key.serverId, key.repositoryPath)) names += label.name
+                for (label in loadLabels(request)) names += label.name
                 CnbRepositoryLabelCatalogResult.Available(
                     labels = names.take(MAX_VISIBLE_LABELS),
                     complete = names.size <= MAX_VISIBLE_LABELS,
@@ -173,17 +192,16 @@ internal object CnbRepositoryLabelCatalogRuntime : CnbRepositoryLabelLookup {
     @Volatile
     private var current: CnbCachingRepositoryLabelCatalog? = null
 
-    override fun lookup(
-        serverId: String,
-        repositoryPath: String,
-    ): CnbRepositoryLabelCatalogResult = catalog().lookup(serverId, repositoryPath)
+    override fun lookup(request: CnbRepositoryLabelLookupRequest): CnbRepositoryLabelCatalogResult = catalog().lookup(request)
 
     private fun catalog(): CnbCachingRepositoryLabelCatalog =
         current ?: synchronized(this) {
             current
                 ?: CnbCachingRepositoryLabelCatalog(
-                    loadLabels = { serverId, repositoryPath ->
-                        CnbClientFactory.create(serverId).use { client -> client.listRepositoryLabels(repositoryPath) }
+                    loadLabels = { request ->
+                        CnbClientFactory
+                            .create(request.serverId, request.credentialsId, request.context)
+                            .use { client -> client.listRepositoryLabels(request.repositoryPath) }
                     },
                 ).also { created -> current = created }
         }

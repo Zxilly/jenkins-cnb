@@ -417,14 +417,14 @@ class CnbPushTrigger
         @Extension
         @Symbol("cnbPush")
         class DescriptorImpl : TriggerDescriptor {
-            private val repositoryLabelLookup: CnbRepositoryLabelLookup
+            private val repositoryLabelForm: CnbRepositoryLabelFormSupport
 
             constructor() : super() {
-                repositoryLabelLookup = CnbRepositoryLabelCatalogRuntime
+                repositoryLabelForm = CnbRepositoryLabelFormSupport(CnbRepositoryLabelCatalogRuntime)
             }
 
             internal constructor(repositoryLabelLookup: CnbRepositoryLabelLookup) : super() {
-                this.repositoryLabelLookup = repositoryLabelLookup
+                repositoryLabelForm = CnbRepositoryLabelFormSupport(repositoryLabelLookup)
             }
 
             override fun getDisplayName(): String = "Build on CNB code or pull request events"
@@ -537,7 +537,7 @@ class CnbPushTrigger
                 @QueryParameter serverId: String?,
                 @QueryParameter repositoryPath: String?,
                 @QueryParameter value: String?,
-            ): AutoCompletionCandidates = autocompleteRepositoryLabels(item, serverId, repositoryPath, value)
+            ): AutoCompletionCandidates = repositoryLabelForm.autocomplete(item, serverId, repositoryPath, null, value)
 
             @POST
             fun doAutoCompleteExcludedPullRequestLabels(
@@ -545,7 +545,7 @@ class CnbPushTrigger
                 @QueryParameter serverId: String?,
                 @QueryParameter repositoryPath: String?,
                 @QueryParameter value: String?,
-            ): AutoCompletionCandidates = autocompleteRepositoryLabels(item, serverId, repositoryPath, value)
+            ): AutoCompletionCandidates = repositoryLabelForm.autocomplete(item, serverId, repositoryPath, null, value)
 
             @POST
             fun doCheckCommentPattern(
@@ -584,29 +584,6 @@ class CnbPushTrigger
                 value: String?,
             ): FormValidation = validateWhenConfigurable(item) { CnbRefGlob.compile(normalizeRefFilter(value)) }
 
-            private fun autocompleteRepositoryLabels(
-                item: Item?,
-                serverId: String?,
-                repositoryPath: String?,
-                value: String?,
-            ): AutoCompletionCandidates {
-                val candidates = AutoCompletionCandidates()
-                if (!canLookupRepositoryLabels(item, serverId, repositoryPath)) return candidates
-                val query = value.orEmpty().substringAfterLast(',').trim()
-                if (query.isEmpty() || query.length > MAX_LABEL_LENGTH) return candidates
-                val catalog =
-                    repositoryLabelLookup.lookup(
-                        requireNotNull(serverId).trim(),
-                        requireNotNull(repositoryPath).trim().trim('/'),
-                    ) as? CnbRepositoryLabelCatalogResult.Available ?: return candidates
-                catalog.labels
-                    .asSequence()
-                    .filter { label -> label.startsWith(query, ignoreCase = true) }
-                    .take(MAX_AUTOCOMPLETE_LABELS)
-                    .forEach(candidates::add)
-                return candidates
-            }
-
             private fun validateRepositoryLabels(
                 item: Item?,
                 required: String?,
@@ -614,60 +591,16 @@ class CnbPushTrigger
                 serverId: String?,
                 repositoryPath: String?,
                 validateRequired: Boolean,
-            ): FormValidation {
-                if (item == null || !item.hasPermission(Item.CONFIGURE)) return FormValidation.ok()
-                val policy =
-                    try {
-                        CnbPullRequestLabelPolicy(required.orEmpty(), excluded.orEmpty())
-                    } catch (failure: IllegalArgumentException) {
-                        return FormValidation.error(failure.message)
-                    }
-                val configured =
-                    (if (validateRequired) policy.requiredConfiguration else policy.excludedConfiguration)
-                        .split(',')
-                        .filter(String::isNotEmpty)
-                if (configured.isEmpty() || !canLookupRepositoryLabels(item, serverId, repositoryPath)) {
-                    return FormValidation.ok()
-                }
-                return when (
-                    val catalog =
-                        repositoryLabelLookup.lookup(
-                            requireNotNull(serverId).trim(),
-                            requireNotNull(repositoryPath).trim().trim('/'),
-                        )
-                ) {
-                    CnbRepositoryLabelCatalogResult.Unavailable -> {
-                        FormValidation.warning("Could not verify labels against CNB; runtime matching remains fail-closed")
-                    }
-
-                    is CnbRepositoryLabelCatalogResult.Available -> {
-                        val unknown = configured.filterNot(catalog.labels.toHashSet()::contains)
-                        when {
-                            !catalog.complete -> {
-                                FormValidation.warning("CNB has more labels than the configuration catalog can display")
-                            }
-
-                            unknown.isNotEmpty() -> {
-                                FormValidation.warning("One or more labels were not found in the CNB repository")
-                            }
-
-                            else -> {
-                                FormValidation.ok()
-                            }
-                        }
-                    }
-                }
-            }
-
-            private fun canLookupRepositoryLabels(
-                item: Item?,
-                serverId: String?,
-                repositoryPath: String?,
-            ): Boolean =
-                item != null &&
-                    item.hasPermission(Item.CONFIGURE) &&
-                    serverId?.trim()?.matches(SERVER_ID_PATTERN) == true &&
-                    repositoryPath?.trim()?.trim('/')?.let(::isRepositoryPath) == true
+            ): FormValidation =
+                repositoryLabelForm.validate(
+                    item,
+                    required,
+                    excluded,
+                    serverId,
+                    repositoryPath,
+                    null,
+                    validateRequired,
+                )
 
             private fun validateWhenConfigurable(
                 item: Item?,
@@ -688,8 +621,6 @@ class CnbPushTrigger
             private const val DEFAULT_BRANCH_FILTER = "**"
             private const val DEFAULT_REF_FILTER = "**"
             private const val DEFAULT_EVENT_FILTER = "push,tag_push"
-            private const val MAX_LABEL_LENGTH = 100
-            private const val MAX_AUTOCOMPLETE_LABELS = 50
             private val SERVER_ID_PATTERN = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
             private val LOGGER = Logger.getLogger(CnbPushTrigger::class.java.name)
 
