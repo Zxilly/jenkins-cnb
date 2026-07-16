@@ -11,7 +11,7 @@ import kotlinx.serialization.json.Json
 import java.nio.charset.StandardCharsets
 
 internal object CnbJsonCodec {
-    private val json =
+    internal val json =
         Json {
             ignoreUnknownKeys = true
             isLenient = false

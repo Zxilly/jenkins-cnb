@@ -143,6 +143,7 @@ import dev.zxilly.jenkins.cnb.security.CnbRepositoryPath
 import dev.zxilly.jenkins.cnb.security.CnbResourcePath
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings
 import hudson.util.Secret
+import io.ktor.util.reflect.typeInfo
 import jenkins.model.Jenkins
 import kotlinx.serialization.DeserializationStrategy
 import kotlinx.serialization.KSerializer
@@ -151,37 +152,26 @@ import kotlinx.serialization.builtins.ListSerializer
 import org.eclipse.jgit.lib.Repository
 import java.io.ByteArrayOutputStream
 import java.io.IOException
-import java.io.InputStream
-import java.io.OutputStream
 import java.net.URI
 import java.net.URISyntaxException
 import java.net.URLEncoder
-import java.net.http.HttpClient
-import java.net.http.HttpHeaders
-import java.net.http.HttpRequest
-import java.net.http.HttpResponse
-import java.net.http.HttpTimeoutException
 import java.nio.ByteBuffer
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
-import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Base64
+import java.util.Collections
 import java.util.HexFormat
+import java.util.IdentityHashMap
 import java.util.LinkedHashSet
-import java.util.concurrent.CompletableFuture
-import java.util.concurrent.CompletionStage
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.ExecutionException
-import java.util.concurrent.Flow
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.min
@@ -193,6 +183,16 @@ internal class CnbEncodedJsonBody(
     fun destroy() {
         bytes.fill(0)
     }
+}
+
+private sealed interface ApiResponseBody<out T> {
+    data class Success<T>(
+        val value: T,
+    ) : ApiResponseBody<T>
+
+    data class Error(
+        val bytes: ByteArray,
+    ) : ApiResponseBody<Nothing>
 }
 
 internal class HttpCnbClient(
@@ -1557,7 +1557,8 @@ internal class HttpCnbClient(
 
     private fun sha256(value: ByteArray): String = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value))
 
-    private fun <T> requestJson(
+    @Suppress("UNUSED_PARAMETER") // Anchors T to the explicit wire schema; Ktor resolves it from TypeInfo.
+    private inline fun <reified T> requestJson(
         method: String,
         path: String,
         serializer: DeserializationStrategy<T>,
@@ -1565,11 +1566,21 @@ internal class HttpCnbClient(
         body: CnbEncodedJsonBody? = null,
         idempotent: Boolean = method == "GET",
         acceptNotFound: Boolean = false,
-    ): T? {
-        val bytes = requestBytes(method, path, query, body, idempotent, acceptNotFound) ?: return null
-        if (bytes.isEmpty()) return null
-        return CnbJsonCodec.decode(serializer, bytes, "response for $path")
-    }
+    ): T? =
+        requestValue(
+            method = method,
+            path = path,
+            query = query,
+            body = body,
+            idempotent = idempotent,
+            acceptNotFound = acceptNotFound,
+        ) { response ->
+            if (response.statusCode == 204 || response.statusCode == 205 || response.headers.allValues("Content-Length") == listOf("0")) {
+                null
+            } else {
+                response.readJson<T>(typeInfo<T>())
+            }
+        }
 
     private fun <T> requestJsonArrayOrItems(
         method: String,
@@ -1612,7 +1623,17 @@ internal class HttpCnbClient(
         body: CnbEncodedJsonBody? = null,
         idempotent: Boolean = method == "GET",
         acceptNotFound: Boolean = false,
-    ): ByteArray? {
+    ): ByteArray? = requestValue(method, path, query, body, idempotent, acceptNotFound) { response -> response.readBytes() }
+
+    private fun <T> requestValue(
+        method: String,
+        path: String,
+        query: Map<String, String>,
+        body: CnbEncodedJsonBody?,
+        idempotent: Boolean,
+        acceptNotFound: Boolean,
+        successReader: CnbHttpResponseReader<T>,
+    ): T? {
         try {
             require(path.startsWith('/') && !path.startsWith("//")) { "CNB API path must be relative to the server" }
             circuit.beforeRequest()
@@ -1621,18 +1642,26 @@ internal class HttpCnbClient(
             val attempts = if (idempotent) MAX_ATTEMPTS else 1
             for (attempt in 1..attempts) {
                 try {
-                    val response = execute(method, uri, body)
-                    if (response.statusCode() == 404 && acceptNotFound) {
+                    val response =
+                        executeWithReader(method, uri, body) { context ->
+                            if (context.statusCode in 200..299) {
+                                ApiResponseBody.Success(successReader.read(context))
+                            } else {
+                                ApiResponseBody.Error(context.readBytes())
+                            }
+                        }
+                    if (response.statusCode == 404 && acceptNotFound) {
                         circuit.success()
                         return null
                     }
-                    if (response.statusCode() in 200..299) {
+                    if (response.statusCode in 200..299) {
                         circuit.success()
-                        return response.body()
+                        return (response.body as ApiResponseBody.Success<T>).value
                     }
 
-                    val retryable = response.statusCode() == 429 || response.statusCode() in RETRYABLE_STATUS_CODES
-                    val error = errorFromResponse(response.statusCode(), response.body(), retryable)
+                    val retryable = response.statusCode == 429 || response.statusCode in RETRYABLE_STATUS_CODES
+                    val errorBytes = (response.body as ApiResponseBody.Error).bytes
+                    val error = errorFromResponse(response.statusCode, errorBytes, retryable)
                     if (!retryable) {
                         circuit.success()
                         throw error
@@ -1642,7 +1671,7 @@ internal class HttpCnbClient(
                         throw error
                     }
                     lastFailure = error
-                    sleepBeforeRetry(attempt, response.headers().firstValue("Retry-After").orElse(null))
+                    sleepBeforeRetry(attempt, response.headers.firstValue("Retry-After"))
                 } catch (e: InterruptedException) {
                     Thread.currentThread().interrupt()
                     throw CnbApiException("Interrupted while calling CNB", retryable = true, cause = e)
@@ -1674,18 +1703,18 @@ internal class HttpCnbClient(
         for (attempt in 1..MAX_ATTEMPTS) {
             try {
                 val response = execute("GET", uri, null, maxResponseBytes = maxBytes)
-                if (response.statusCode() == 404) {
+                if (response.statusCode == 404) {
                     circuit.success()
                     return null
                 }
-                if (response.statusCode() in 200..299) {
+                if (response.statusCode in 200..299) {
                     circuit.success()
-                    val contentType = validateRawContentType(response.headers().firstValue("Content-Type").orElse(""))
-                    return CnbRawContent(response.body(), contentType)
+                    val contentType = validateRawContentType(response.headers.firstValue("Content-Type").orEmpty())
+                    return CnbRawContent(response.body, contentType)
                 }
 
-                val retryable = response.statusCode() == 429 || response.statusCode() in RETRYABLE_STATUS_CODES
-                val error = errorFromResponse(response.statusCode(), response.body(), retryable)
+                val retryable = response.statusCode == 429 || response.statusCode in RETRYABLE_STATUS_CODES
+                val error = errorFromResponse(response.statusCode, response.body, retryable)
                 if (!retryable) {
                     circuit.success()
                     throw error
@@ -1695,7 +1724,7 @@ internal class HttpCnbClient(
                     throw error
                 }
                 lastFailure = error
-                sleepBeforeRetry(attempt, response.headers().firstValue("Retry-After").orElse(null))
+                sleepBeforeRetry(attempt, response.headers.firstValue("Retry-After"))
             } catch (e: InterruptedException) {
                 Thread.currentThread().interrupt()
                 throw CnbApiException("Interrupted while calling CNB", retryable = true, cause = e)
@@ -1765,36 +1794,34 @@ internal class HttpCnbClient(
 
     private fun requestPresignedBytesOnce(initialUri: URI): ByteArray? {
         val first = execute("GET", initialUri, null, includeAuthorization = true)
-        if (first.statusCode() in 200..299) {
-            return first.body().takeIf { it.isNotEmpty() }
+        if (first.statusCode in 200..299) {
+            return first.body.takeIf { it.isNotEmpty() }
         }
-        if (first.statusCode() !in REDIRECT_STATUS_CODES) {
-            val retryable = first.statusCode() in RETRYABLE_STATUS_CODES || first.statusCode() == 429
-            throw errorFromResponse(first.statusCode(), first.body(), retryable)
+        if (first.statusCode !in REDIRECT_STATUS_CODES) {
+            val retryable = first.statusCode in RETRYABLE_STATUS_CODES || first.statusCode == 429
+            throw errorFromResponse(first.statusCode, first.body, retryable)
         }
 
         var target =
-            first.headers().firstValue("Location").orElseThrow {
-                CnbApiException("CNB repository-events redirect did not include Location")
-            }
+            first.headers.firstValue("Location")
+                ?: throw CnbApiException("CNB repository-events redirect did not include Location")
         var targetUri = initialUri.resolve(target)
         for (redirect in 1..MAX_PRESIGNED_REDIRECTS) {
             validatePresignedUri(targetUri)
             val response = execute("GET", targetUri, null, includeAuthorization = false)
-            if (response.statusCode() in 200..299) {
-                return response.body().takeIf { it.isNotEmpty() }
+            if (response.statusCode in 200..299) {
+                return response.body.takeIf { it.isNotEmpty() }
             }
-            if (response.statusCode() !in REDIRECT_STATUS_CODES) {
-                val retryable = response.statusCode() in RETRYABLE_STATUS_CODES || response.statusCode() == 429
-                throw errorFromResponse(response.statusCode(), response.body(), retryable)
+            if (response.statusCode !in REDIRECT_STATUS_CODES) {
+                val retryable = response.statusCode in RETRYABLE_STATUS_CODES || response.statusCode == 429
+                throw errorFromResponse(response.statusCode, response.body, retryable)
             }
             if (redirect == MAX_PRESIGNED_REDIRECTS) {
                 throw CnbApiException("CNB repository-events redirect limit exceeded")
             }
             target =
-                response.headers().firstValue("Location").orElseThrow {
-                    CnbApiException("CNB object-storage redirect did not include Location")
-                }
+                response.headers.firstValue("Location")
+                    ?: throw CnbApiException("CNB object-storage redirect did not include Location")
             targetUri = targetUri.resolve(target)
         }
         throw CnbApiException("CNB repository-events redirect limit exceeded")
@@ -1844,25 +1871,25 @@ internal class HttpCnbClient(
         for (redirect in 0..MAX_PRESIGNED_REDIRECTS) {
             val response = executeDownload(current, includeAuthorization, maxBytes, target)
             when {
-                response.statusCode() == 404 -> {
+                response.statusCode == 404 -> {
                     return null
                 }
 
-                response.statusCode() in 200..299 -> {
+                response.statusCode in 200..299 -> {
                     val streamed =
-                        response.body() as? TransferBody.Streamed
+                        response.body as? TransferBody.Streamed
                             ?: throw CnbApiException("CNB release asset response was not streamed")
                     return CnbReleaseAssetDownload(
                         contentLength = streamed.length,
-                        contentType = optionalResponseMediaType(response.headers()),
-                        etag = safeResponseHeader(response.headers(), "ETag", MAX_ETAG_LENGTH),
+                        contentType = optionalResponseMediaType(response.headers),
+                        etag = safeResponseHeader(response.headers, "ETag", MAX_ETAG_LENGTH),
                     )
                 }
 
-                response.statusCode() !in REDIRECT_STATUS_CODES -> {
-                    val bytes = (response.body() as? TransferBody.Buffered)?.bytes ?: ByteArray(0)
-                    val retryable = response.statusCode() == 429 || response.statusCode() in RETRYABLE_STATUS_CODES
-                    throw errorFromResponse(response.statusCode(), bytes, retryable)
+                response.statusCode !in REDIRECT_STATUS_CODES -> {
+                    val bytes = (response.body as? TransferBody.Buffered)?.bytes ?: ByteArray(0)
+                    val retryable = response.statusCode == 429 || response.statusCode in RETRYABLE_STATUS_CODES
+                    throw errorFromResponse(response.statusCode, bytes, retryable)
                 }
 
                 redirect == MAX_PRESIGNED_REDIRECTS -> {
@@ -1870,7 +1897,7 @@ internal class HttpCnbClient(
                 }
 
                 else -> {
-                    current = resolveSignedRedirect(current, response.headers(), "release asset")
+                    current = resolveSignedRedirect(current, response.headers, "release asset")
                     validateSignedTransferUri(current)
                     includeAuthorization = false
                 }
@@ -1884,26 +1911,35 @@ internal class HttpCnbClient(
         includeAuthorization: Boolean,
         maxBytes: Long,
         target: CnbDownloadTarget,
-    ): HttpResponse<TransferBody> {
+    ): CnbHttpResponse<TransferBody> {
         require(uri.isAbsolute && !uri.host.isNullOrBlank()) { "CNB release asset URI must have a host" }
         if (!server.allowPrivateNetwork) CnbEndpointPolicy.validatePublicAddress(uri.host)
-        val builder =
-            HttpRequest
-                .newBuilder(uri)
-                .timeout(Duration.ofSeconds(server.requestTimeoutSeconds.toLong()))
-                .header("User-Agent", userAgent())
-                .GET()
+        val headers = ArrayList<Pair<String, String>>()
+        headers += "User-Agent" to userAgent()
         if (includeAuthorization) {
-            builder.header("Accept", CNB_MEDIA_TYPE)
-            token?.let { builder.header("Authorization", "Bearer ${it.plainText}") }
+            headers += "Accept" to CNB_MEDIA_TYPE
+            token?.let { headers += "Authorization" to "Bearer ${it.plainText}" }
         }
-        return sendRequest(builder.build()) { response ->
-            if (response.statusCode() in 200..299) {
-                StreamingBodySubscriber(maxBytes, response.headers().firstValue("Content-Length").orElse(null), target)
+        val request =
+            CnbHttpRequest(
+                method = "GET",
+                uri = uri,
+                headers = CnbHttpHeaders.of(*headers.toTypedArray()),
+                negotiateCnbJson = includeAuthorization,
+            )
+        return sendRequest(request) { response ->
+            if (response.statusCode in 200..299) {
+                val declaredLength =
+                    response.headers.firstValue("Content-Length")?.let { value ->
+                        value.toLongOrNull()
+                            ?: throw CnbApiException(
+                                "CNB release asset response contained an invalid Content-Length header",
+                            )
+                    }
+                val length = response.streamTo(maxBytes, declaredLength, target::openStream)
+                TransferBody.Streamed(length)
             } else {
-                HttpResponse.BodySubscribers.mapping(BoundedByteArraySubscriber(MAX_TRANSFER_ERROR_BYTES)) { bytes ->
-                    TransferBody.Buffered(bytes)
-                }
+                TransferBody.Buffered(response.readBoundedBytes(MAX_TRANSFER_ERROR_BYTES))
             }
         }
     }
@@ -1943,17 +1979,17 @@ internal class HttpCnbClient(
         for (redirect in 0..MAX_PRESIGNED_REDIRECTS) {
             val response = execute("HEAD", current, null, includeAuthorization = includeAuthorization)
             when {
-                response.statusCode() == 404 -> {
+                response.statusCode == 404 -> {
                     return CnbReleaseAssetHead(exists = false)
                 }
 
-                response.statusCode() in 200..299 -> {
-                    return releaseAssetHead(response.headers())
+                response.statusCode in 200..299 -> {
+                    return releaseAssetHead(response.headers)
                 }
 
-                response.statusCode() !in REDIRECT_STATUS_CODES -> {
-                    val retryable = response.statusCode() == 429 || response.statusCode() in RETRYABLE_STATUS_CODES
-                    throw errorFromResponse(response.statusCode(), response.body(), retryable)
+                response.statusCode !in REDIRECT_STATUS_CODES -> {
+                    val retryable = response.statusCode == 429 || response.statusCode in RETRYABLE_STATUS_CODES
+                    throw errorFromResponse(response.statusCode, response.body, retryable)
                 }
 
                 redirect == MAX_PRESIGNED_REDIRECTS -> {
@@ -1961,7 +1997,7 @@ internal class HttpCnbClient(
                 }
 
                 else -> {
-                    current = resolveSignedRedirect(current, response.headers(), "release asset")
+                    current = resolveSignedRedirect(current, response.headers, "release asset")
                     validateSignedTransferUri(current)
                     includeAuthorization = false
                 }
@@ -1970,7 +2006,7 @@ internal class HttpCnbClient(
         throw CnbApiException("CNB release asset redirect limit exceeded")
     }
 
-    private fun releaseAssetHead(headers: HttpHeaders): CnbReleaseAssetHead {
+    private fun releaseAssetHead(headers: CnbHttpHeaders): CnbReleaseAssetHead {
         val length = optionalContentLength(headers, MAX_RELEASE_ASSET_METADATA_BYTES)
         return CnbReleaseAssetHead(
             exists = true,
@@ -2006,9 +2042,9 @@ internal class HttpCnbClient(
         putSignedReleaseAsset(uploadUri, request.size, source)
 
         val response = execute("POST", verificationUri, null, includeAuthorization = true)
-        if (response.statusCode() !in 200..299) {
-            val retryable = response.statusCode() == 429 || response.statusCode() in RETRYABLE_STATUS_CODES
-            throw errorFromResponse(response.statusCode(), response.body(), retryable)
+        if (response.statusCode !in 200..299) {
+            val retryable = response.statusCode == 429 || response.statusCode in RETRYABLE_STATUS_CODES
+            throw errorFromResponse(response.statusCode, response.body, retryable)
         }
     }
 
@@ -2021,19 +2057,20 @@ internal class HttpCnbClient(
         for (redirect in 0..MAX_PRESIGNED_REDIRECTS) {
             validateSignedTransferUri(current)
             val request =
-                HttpRequest
-                    .newBuilder(current)
-                    .timeout(Duration.ofSeconds(server.requestTimeoutSeconds.toLong()))
-                    .PUT(FixedLengthBodyPublisher(size, source))
-                    .build()
-            val response = sendRequest(request) { BoundedByteArraySubscriber(MAX_UPLOAD_RESPONSE_BYTES) }
+                CnbHttpRequest(
+                    method = "PUT",
+                    uri = current,
+                    body = CnbHttpRequestBody.RepeatableStream(size, source::openStream),
+                    negotiateCnbJson = false,
+                )
+            val response = sendRequest(request) { it.readBoundedBytes(MAX_UPLOAD_RESPONSE_BYTES) }
             when {
-                response.statusCode() in 200..299 -> {
+                response.statusCode in 200..299 -> {
                     return
                 }
 
-                response.statusCode() !in SIGNED_UPLOAD_REDIRECT_STATUS_CODES -> {
-                    throw errorFromResponse(response.statusCode(), response.body(), retryable = false)
+                response.statusCode !in SIGNED_UPLOAD_REDIRECT_STATUS_CODES -> {
+                    throw errorFromResponse(response.statusCode, response.body, retryable = false)
                 }
 
                 redirect == MAX_PRESIGNED_REDIRECTS -> {
@@ -2041,7 +2078,7 @@ internal class HttpCnbClient(
                 }
 
                 else -> {
-                    current = resolveSignedRedirect(current, response.headers(), "release asset upload")
+                    current = resolveSignedRedirect(current, response.headers, "release asset upload")
                 }
             }
         }
@@ -2188,7 +2225,7 @@ internal class HttpCnbClient(
 
     private fun resolveSignedRedirect(
         current: URI,
-        headers: HttpHeaders,
+        headers: CnbHttpHeaders,
         purpose: String,
     ): URI {
         val location = safeResponseHeader(headers, "Location", MAX_EXTERNAL_URL_LENGTH)
@@ -2217,7 +2254,7 @@ internal class HttpCnbClient(
         }
 
     private fun safeResponseHeader(
-        headers: HttpHeaders,
+        headers: CnbHttpHeaders,
         name: String,
         maxLength: Int,
     ): String {
@@ -2232,7 +2269,7 @@ internal class HttpCnbClient(
     }
 
     private fun optionalContentLength(
-        headers: HttpHeaders,
+        headers: CnbHttpHeaders,
         maxBytes: Long,
     ): Long? {
         val value = safeResponseHeader(headers, "Content-Length", 32)
@@ -2244,7 +2281,7 @@ internal class HttpCnbClient(
         return parsed
     }
 
-    private fun optionalResponseMediaType(headers: HttpHeaders): String {
+    private fun optionalResponseMediaType(headers: CnbHttpHeaders): String {
         val value = safeResponseHeader(headers, "Content-Type", MAX_CONTENT_TYPE_LENGTH)
         return value.takeIf(String::isNotEmpty)?.let(::validateReleaseMediaType).orEmpty()
     }
@@ -2265,40 +2302,54 @@ internal class HttpCnbClient(
         body: CnbEncodedJsonBody?,
         includeAuthorization: Boolean = true,
         maxResponseBytes: Int? = null,
-    ): HttpResponse<ByteArray> {
+    ): CnbHttpResponse<ByteArray> =
+        executeWithReader(method, uri, body, includeAuthorization) { response ->
+            if (maxResponseBytes == null) {
+                response.readBytes()
+            } else {
+                response.readBoundedBytes(maxResponseBytes)
+            }
+        }
+
+    private fun <T> executeWithReader(
+        method: String,
+        uri: URI,
+        body: CnbEncodedJsonBody?,
+        includeAuthorization: Boolean = true,
+        reader: CnbHttpResponseReader<T>,
+    ): CnbHttpResponse<T> {
         require(uri.isAbsolute && !uri.host.isNullOrBlank()) { "CNB request URI must have a host" }
         if (!server.allowPrivateNetwork) CnbEndpointPolicy.validatePublicAddress(uri.host)
         val requestBody = body?.bytes ?: ByteArray(0)
-        val publisher =
+        val transportBody =
             if (requestBody.isEmpty() && method in setOf("GET", "DELETE")) {
-                HttpRequest.BodyPublishers.noBody()
+                CnbHttpRequestBody.Empty
             } else {
-                HttpRequest.BodyPublishers.ofByteArray(requestBody)
+                CnbHttpRequestBody.Bytes(requestBody)
             }
-        val requestBuilder =
-            HttpRequest
-                .newBuilder(uri)
-                .timeout(Duration.ofSeconds(server.requestTimeoutSeconds.toLong()))
-                .header("Accept", CNB_MEDIA_TYPE)
-                .header("User-Agent", userAgent())
-                .method(method, publisher)
-        if (body != null) requestBuilder.header("Content-Type", "application/json; charset=utf-8")
+        val headers = ArrayList<Pair<String, String>>()
+        headers += "User-Agent" to userAgent()
+        if (body != null) headers += "Content-Type" to "application/json; charset=utf-8"
         if (includeAuthorization) {
-            token?.let { requestBuilder.header("Authorization", "Bearer ${it.plainText}") }
+            headers += "Accept" to CNB_MEDIA_TYPE
+            token?.let { headers += "Authorization" to "Bearer ${it.plainText}" }
         }
 
-        val request = requestBuilder.build()
-        return if (maxResponseBytes == null) {
-            sendRequest(request, HttpResponse.BodyHandlers.ofByteArray())
-        } else {
-            sendRequest(request) { BoundedByteArraySubscriber(maxResponseBytes) }
-        }
+        val request =
+            CnbHttpRequest(
+                method = method,
+                uri = uri,
+                headers = CnbHttpHeaders.of(*headers.toTypedArray()),
+                body = transportBody,
+                negotiateCnbJson = includeAuthorization,
+            )
+        return sendRequest(request, reader)
     }
 
     private fun <T> sendRequest(
-        request: HttpRequest,
-        bodyHandler: HttpResponse.BodyHandler<T>,
-    ): HttpResponse<T> {
+        request: CnbHttpRequest,
+        reader: CnbHttpResponseReader<T>,
+    ): CnbHttpResponse<T> {
         val acquired = permits.tryAcquire(PERMIT_WAIT_SECONDS, TimeUnit.SECONDS)
         if (!acquired) {
             throw CnbApiException(
@@ -2307,23 +2358,15 @@ internal class HttpCnbClient(
             )
         }
         return try {
-            val response =
-                httpClient.sendAsync(request, bodyHandler)
             try {
-                response.get(server.requestTimeoutSeconds.toLong(), TimeUnit.SECONDS)
-            } catch (_: TimeoutException) {
-                response.cancel(true)
-                throw HttpTimeoutException("CNB response exceeded the configured request deadline")
+                httpClient.execute(request, reader)
             } catch (failure: InterruptedException) {
-                response.cancel(true)
                 throw failure
-            } catch (failure: ExecutionException) {
-                val cause = failure.cause ?: failure
-                findApiFailure(cause)?.let { throw it }
+            } catch (failure: Exception) {
+                findApiFailure(failure)?.let { throw it }
                 // Transport implementations may embed the full request URI in exception messages.
                 // Signed URIs carry credentials in their query string, so no untrusted cause is
                 // allowed to cross this diagnostic boundary.
-                if (cause is IOException) throw IOException("CNB HTTP transport failed")
                 throw IOException("CNB HTTP transport failed")
             }
         } finally {
@@ -3517,7 +3560,6 @@ internal class HttpCnbClient(
     }
 
     companion object {
-        private const val CNB_MEDIA_TYPE = "application/vnd.cnb.api+json"
         private const val PAGE_SIZE = 100
         private const val MAX_PAGES = 100
         private const val MAX_PAGINATED_ITEMS = 10_000
@@ -3614,210 +3656,20 @@ internal class HttpCnbClient(
         private const val MAX_PRESIGNED_REDIRECTS = 3
         private const val CIRCUIT_FAILURE_THRESHOLD = 5
         private const val CIRCUIT_OPEN_MILLIS = 30_000L
-        private const val MAX_CAUSE_DEPTH = 16
+        private const val MAX_FAILURE_GRAPH_NODES = 32
         private val PERMITS = ConcurrentHashMap<String, Semaphore>()
         private val CIRCUITS = ConcurrentHashMap<String, CircuitBreaker>()
 
-        private class FixedLengthBodyPublisher(
-            private val size: Long,
-            private val source: CnbRepeatableInput,
-        ) : HttpRequest.BodyPublisher {
-            override fun contentLength(): Long = size
-
-            override fun subscribe(subscriber: Flow.Subscriber<in ByteBuffer>) {
-                HttpRequest.BodyPublishers
-                    .ofInputStream { ExactLengthInputStream(source.openStream(), size) }
-                    .subscribe(subscriber)
-            }
-        }
-
-        private class ExactLengthInputStream(
-            private val delegate: InputStream,
-            expected: Long,
-        ) : InputStream() {
-            private var remaining = expected
-            private var endVerified = false
-
-            override fun read(): Int {
-                if (remaining == 0L) return verifyEnd()
-                val value = delegate.read()
-                if (value < 0) throw IOException("CNB release asset source ended before its declared size")
-                remaining--
-                return value
-            }
-
-            override fun read(
-                target: ByteArray,
-                offset: Int,
-                length: Int,
-            ): Int {
-                if (length == 0) return 0
-                if (remaining == 0L) return verifyEnd()
-                val requested = minOf(length.toLong(), remaining).toInt()
-                val count = delegate.read(target, offset, requested)
-                if (count < 0) throw IOException("CNB release asset source ended before its declared size")
-                remaining -= count
-                return count
-            }
-
-            private fun verifyEnd(): Int {
-                if (!endVerified) {
-                    if (delegate.read() >= 0) throw IOException("CNB release asset source exceeded its declared size")
-                    endVerified = true
-                }
-                return -1
-            }
-
-            override fun close() = delegate.close()
-        }
-
-        private class StreamingBodySubscriber(
-            private val maxBytes: Long,
-            private val declaredLength: String?,
-            private val target: CnbDownloadTarget,
-        ) : HttpResponse.BodySubscriber<TransferBody> {
-            private val body = CompletableFuture<TransferBody>()
-            private var subscription: Flow.Subscription? = null
-            private var output: OutputStream? = null
-            private var expectedLength: Long? = null
-            private var received = 0L
-
-            override fun getBody(): CompletionStage<TransferBody> = body
-
-            override fun onSubscribe(value: Flow.Subscription) {
-                if (subscription != null) {
-                    value.cancel()
-                    return
-                }
-                subscription = value
-                val expected = declaredLength?.toLongOrNull()
-                if (declaredLength != null && (expected == null || expected !in 0..maxBytes)) {
-                    fail(CnbApiException("CNB release asset response contained an invalid Content-Length header"))
-                    return
-                }
-                expectedLength = expected
-                try {
-                    output = target.openStream()
-                } catch (_: Exception) {
-                    fail(IOException("Could not open the CNB release asset download target"))
-                    return
-                }
-                value.request(1)
-            }
-
-            override fun onNext(buffers: List<ByteBuffer>) {
-                if (body.isDone) return
-                try {
-                    val expected = expectedLength
-                    for (buffer in buffers) {
-                        val length = buffer.remaining()
-                        val next = received + length
-                        if (next > maxBytes || (expected != null && next > expected)) {
-                            fail(CnbApiException("CNB release asset response exceeded its declared download limit"))
-                            return
-                        }
-                        val bytes = ByteArray(length)
-                        buffer.get(bytes)
-                        output!!.write(bytes)
-                        received = next
-                    }
-                    subscription?.request(1)
-                } catch (_: IOException) {
-                    fail(IOException("Could not write the CNB release asset download target"))
-                }
-            }
-
-            override fun onError(failure: Throwable) {
-                closeOutput()
-                body.completeExceptionally(failure)
-            }
-
-            override fun onComplete() {
-                if (body.isDone) return
-                val expected = expectedLength
-                if (expected != null && received != expected) {
-                    fail(CnbApiException("CNB release asset response did not match Content-Length"))
-                    return
-                }
-                try {
-                    output?.close()
-                    output = null
-                    body.complete(TransferBody.Streamed(received))
-                } catch (_: IOException) {
-                    body.completeExceptionally(IOException("Could not close the CNB release asset download target"))
-                }
-            }
-
-            private fun fail(failure: Throwable) {
-                subscription?.cancel()
-                closeOutput()
-                body.completeExceptionally(failure)
-            }
-
-            private fun closeOutput() {
-                try {
-                    output?.close()
-                } catch (_: IOException) {
-                    // The primary transport failure remains authoritative.
-                } finally {
-                    output = null
-                }
-            }
-        }
-
-        private class BoundedByteArraySubscriber(
-            maxBytes: Int,
-        ) : HttpResponse.BodySubscriber<ByteArray> {
-            private val body = CompletableFuture<ByteArray>()
-            private val output = ByteArrayOutputStream(min(maxBytes, 8192))
-            private val limit = maxBytes.toLong()
-            private var subscription: Flow.Subscription? = null
-            private var received = 0L
-
-            override fun getBody(): CompletionStage<ByteArray> = body
-
-            override fun onSubscribe(value: Flow.Subscription) {
-                if (subscription != null) {
-                    value.cancel()
-                    return
-                }
-                subscription = value
-                value.request(1)
-            }
-
-            override fun onNext(buffers: List<ByteBuffer>) {
-                if (body.isDone) return
-                for (buffer in buffers) {
-                    val length = buffer.remaining()
-                    if (received + length > limit) {
-                        subscription?.cancel()
-                        output.reset()
-                        body.completeExceptionally(CnbApiException("CNB response exceeded $limit bytes"))
-                        return
-                    }
-                    val bytes = ByteArray(length)
-                    buffer.get(bytes)
-                    output.write(bytes)
-                    received += length
-                }
-                subscription?.request(1)
-            }
-
-            override fun onError(failure: Throwable) {
-                output.reset()
-                body.completeExceptionally(failure)
-            }
-
-            override fun onComplete() {
-                body.complete(output.toByteArray())
-            }
-        }
-
         private fun findApiFailure(failure: Throwable): CnbApiException? {
-            var current: Throwable? = failure
-            repeat(MAX_CAUSE_DEPTH) {
+            val pending = ArrayDeque<Throwable>()
+            val seen = Collections.newSetFromMap(IdentityHashMap<Throwable, Boolean>())
+            pending.add(failure)
+            repeat(MAX_FAILURE_GRAPH_NODES) {
+                val current = pending.removeFirstOrNull() ?: return null
+                if (!seen.add(current)) return@repeat
                 if (current is CnbApiException) return current
-                current = current?.cause ?: return null
+                current.cause?.let(pending::addLast)
+                current.suppressed.forEach(pending::addLast)
             }
             return null
         }

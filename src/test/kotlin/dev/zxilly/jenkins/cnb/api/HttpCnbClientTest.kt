@@ -52,6 +52,7 @@ import java.time.Instant
 import java.time.ZonedDateTime
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 
 class HttpCnbClientTest {
     private lateinit var server: HttpServer
@@ -76,6 +77,9 @@ class HttpCnbClientTest {
                     exchange.requestURI.rawPath,
                     exchange.requestURI.rawQuery.orEmpty(),
                     exchange.requestHeaders.getFirst("Authorization"),
+                    exchange.requestHeaders["Accept"].orEmpty(),
+                    exchange.requestHeaders.getFirst("Content-Length"),
+                    exchange.requestHeaders.getFirst("Transfer-Encoding"),
                     exchange.requestBody.readAllBytes().toString(StandardCharsets.UTF_8),
                 )
             val handler = handlers[exchange.requestURI.path]
@@ -125,6 +129,27 @@ class HttpCnbClientTest {
         assertEquals("alice@example.com", user.email)
         assertEquals("GET", requests.single().method)
         assertEquals("/user", requests.single().rawPath)
+        assertEquals(listOf(CNB_MEDIA_TYPE), requests.single().accept)
+    }
+
+    @Test
+    fun `retries a retryable status before interpreting a malformed error content type`() {
+        val attempts = AtomicInteger()
+        handlers["/user"] = { exchange ->
+            if (attempts.incrementAndGet() == 1) {
+                exchange.responseHeaders.add("Content-Type", "not a media type")
+                val body = "temporary".toByteArray(StandardCharsets.UTF_8)
+                exchange.sendResponseHeaders(503, body.size.toLong())
+                exchange.responseBody.use { it.write(body) }
+            } else {
+                respond(exchange, 200, """{"username":"alice","nickname":"","email":""}""")
+            }
+        }
+
+        val user = client.testConnection()
+
+        assertEquals("alice", user.username)
+        assertEquals(2, attempts.get())
     }
 
     @Test
@@ -560,7 +585,9 @@ class HttpCnbClientTest {
         assertEquals("runner output", sink.toString(StandardCharsets.UTF_8))
         assertEquals("runner-etag", download.etag)
         assertEquals("Bearer top-secret", requests.single { it.rawPath.contains("runner/download") }.authorization)
-        assertNull(requests.single { it.rawPath == "/object/runner-log" }.authorization)
+        val external = requests.single { it.rawPath == "/object/runner-log" }
+        assertNull(external.authorization)
+        assertNoJsonNegotiation(external)
     }
 
     @Test
@@ -1065,6 +1092,33 @@ class HttpCnbClientTest {
         val failure = assertThrows(CnbApiException::class.java) { client.testConnection() }
 
         assertTrue(failure.message.orEmpty().contains("empty user response"))
+    }
+
+    @Test
+    fun `treats reset-content as an empty authenticated-user response`() {
+        handlers["/user"] = { exchange ->
+            exchange.sendResponseHeaders(205, -1)
+            exchange.close()
+        }
+
+        val failure = assertThrows(CnbApiException::class.java) { client.testConnection() }
+
+        assertTrue(failure.message.orEmpty().contains("empty user response"))
+        assertEquals(1, requests.size)
+    }
+
+    @Test
+    fun `fails closed on a chunked empty JSON object response without retrying`() {
+        handlers["/user"] = { exchange ->
+            exchange.responseHeaders.add("Content-Type", "application/json")
+            exchange.sendResponseHeaders(200, 0)
+            exchange.responseBody.close()
+        }
+
+        val failure = assertThrows(CnbApiException::class.java) { client.testConnection() }
+
+        assertFalse(failure.retryable)
+        assertEquals(1, requests.size)
     }
 
     @Test
@@ -1828,6 +1882,7 @@ class HttpCnbClientTest {
         assertTrue(artifact.contentEquals(sinks.single().toByteArray()))
         assertEquals("Bearer top-secret", requests.first().authorization)
         assertNull(requests.last().authorization)
+        assertNoJsonNegotiation(requests.last())
         assertTrue(requests.first().query.contains("share=true"))
     }
 
@@ -1854,6 +1909,7 @@ class HttpCnbClientTest {
         assertEquals("head-etag", head.etag)
         assertEquals("Bearer top-secret", requests.first().authorization)
         assertNull(requests.last().authorization)
+        assertNoJsonNegotiation(requests.last())
     }
 
     @Test
@@ -1914,10 +1970,21 @@ class HttpCnbClientTest {
         assertEquals("PUT", upload.method)
         assertEquals("artifact", upload.body)
         assertNull(upload.authorization)
+        assertNoJsonNegotiation(upload)
         val confirmation = requests.single { it.rawPath.contains("asset-upload-confirmation") }
         assertEquals("POST", confirmation.method)
         assertEquals("Bearer top-secret", confirmation.authorization)
         assertEquals("ttl=30", confirmation.query)
+    }
+
+    @Test
+    fun `reopens an exact release asset stream across a 307 signed redirect`() {
+        assertSignedUploadRedirect(307)
+    }
+
+    @Test
+    fun `reopens an exact release asset stream across a 308 signed redirect`() {
+        assertSignedUploadRedirect(308)
     }
 
     @Test
@@ -2305,6 +2372,7 @@ class HttpCnbClientTest {
 
     private fun configureReleaseUploadTicket(
         ttlDays: Int = 30,
+        uploadUrl: String = "http://127.0.0.1:${server.address.port}/object/upload?signature=signed",
         verifyUrl: String =
             "http://127.0.0.1:${server.address.port}/org/repo/-/releases/release-1/asset-upload-confirmation/token/" +
                 "%2Forg%2Frepo%2F-%2Freleases%2Fdownload%2Fv1.0.0%2Fplugin.hpi?ttl=$ttlDays",
@@ -2313,9 +2381,54 @@ class HttpCnbClientTest {
             respond(
                 exchange,
                 200,
-                """{"expires_in_sec":300,"upload_url":"http://127.0.0.1:${server.address.port}/object/upload?signature=signed","verify_url":"$verifyUrl"}""",
+                """{"expires_in_sec":300,"upload_url":"$uploadUrl","verify_url":"$verifyUrl"}""",
             )
         }
+    }
+
+    private fun assertSignedUploadRedirect(status: Int) {
+        val artifact = "redirected-artifact".toByteArray(StandardCharsets.UTF_8)
+        val opened = AtomicInteger()
+        configureReleaseUploadTicket(
+            uploadUrl = "http://127.0.0.1:${server.address.port}/object/upload-start?signature=first",
+        )
+        handlers["/object/upload-start"] = { exchange ->
+            exchange.responseHeaders.add(
+                "Location",
+                "http://127.0.0.1:${server.address.port}/object/upload-final?signature=second",
+            )
+            exchange.sendResponseHeaders(status, -1)
+            exchange.close()
+        }
+        handlers["/object/upload-final"] = { exchange -> respond(exchange, 200, "") }
+        handlers[
+            "/org/repo/-/releases/release-1/asset-upload-confirmation/token//org/repo/-/releases/download/v1.0.0/plugin.hpi",
+        ] = { exchange -> respond(exchange, 204, "") }
+
+        client.uploadReleaseAsset(
+            "org/repo",
+            "release-1",
+            CnbReleaseAssetUploadRequest("plugin.hpi", artifact.size.toLong(), ttlDays = 30),
+            CnbRepeatableInput {
+                opened.incrementAndGet()
+                ByteArrayInputStream(artifact)
+            },
+        )
+
+        val uploads = requests.filter { it.rawPath == "/object/upload-start" || it.rawPath == "/object/upload-final" }
+        assertEquals(2, uploads.size)
+        assertEquals(2, opened.get())
+        assertEquals("signature=first", uploads.single { it.rawPath == "/object/upload-start" }.query)
+        assertEquals("signature=second", uploads.single { it.rawPath == "/object/upload-final" }.query)
+        uploads.forEach { upload ->
+            assertEquals("PUT", upload.method)
+            assertEquals("redirected-artifact", upload.body)
+            assertEquals(artifact.size.toString(), upload.contentLength)
+            assertNull(upload.transferEncoding)
+            assertNull(upload.authorization)
+            assertNoJsonNegotiation(upload)
+        }
+        assertEquals(1, requests.count { it.rawPath.contains("asset-upload-confirmation") })
     }
 
     private fun respond(
@@ -2350,11 +2463,20 @@ class HttpCnbClientTest {
         return output
     }
 
+    private fun assertNoJsonNegotiation(request: Request) {
+        val advertised = request.accept.joinToString(",").lowercase()
+        assertFalse(advertised.contains(CNB_MEDIA_TYPE))
+        assertFalse(advertised.contains("application/json"))
+    }
+
     private data class Request(
         val method: String,
         val rawPath: String,
         val query: String,
         val authorization: String?,
+        val accept: List<String>,
+        val contentLength: String?,
+        val transferEncoding: String?,
         val body: String,
     )
 }

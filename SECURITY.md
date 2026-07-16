@@ -19,17 +19,20 @@ been included in logs or payloads before sharing diagnostic material.
   key.
 - Leave private-network and insecure-HTTP endpoint options disabled for `cnb.cool`. With private
   networking disabled, every address returned for a destination must be public unicast. DNS is
-  resolved and checked at Apache HttpClient's socket-connection seam, and that exact validated
-  address set is passed to the connection operator. This closes the validate-then-resolve DNS
-  rebinding window for every new connection.
-- Enabling private networking deliberately permits private destinations and switches to Jenkins'
-  standard JDK HTTP transport; it is intended only for administrator-controlled private CNB
-  installations. Plain HTTP remains a separate explicit opt-in. Signed external transfer targets
-  accept it only when both private networking and insecure HTTP are enabled; repository-event
-  targets always require HTTPS.
-- Automatic redirects are disabled. The bounded repository-event and Release Asset transfer flows
-  resolve and validate every redirect hop before sending it, including scheme, host, user-info,
-  fragment, and (unless private networking is enabled) public-address policy. The CNB bearer
-  credential is never forwarded from the API origin to object storage.
+  resolved and checked at the Apache5 engine's socket-connection seam, and that exact validated
+  address set is passed to the connection operator. Apache5 is used only as Ktor Client's official
+  engine; Ktor owns HTTP execution, timeouts, response handling, and client lifecycle.
+- Enabling private networking deliberately permits private destinations. Ktor remains the transport
+  owner and applies Jenkins `ProxyConfiguration` through its Apache5 engine. This mode is only for
+  administrator-controlled private CNB installations.
+- Plain HTTP remains a separate explicit opt-in. Signed external transfer targets accept it only
+  when private networking and insecure HTTP are both enabled; repository-event targets always
+  require HTTPS.
+- Automatic redirects are disabled in Ktor. The bounded repository-event and Release Asset flows
+  resolve and validate every hop before sending it, including scheme, host, user-info, fragment,
+  and, unless private networking is enabled, public-address policy.
+- The CNB bearer credential and CNB/JSON content-negotiation headers are never forwarded from the
+  API origin to object storage. Signed URLs and transfer tickets remain transport-local;
+  credentials, secrets, and raw response bodies are never written to build state or logs.
 - Use separate least-privilege scan, checkout, and result-reporting credentials and rotate them on a
   documented schedule.

@@ -4,7 +4,7 @@
 
 - `config`、`credentials`：多 CNB Server、凭据引用和 JCasC；
 - `security`：endpoint、仓库路径、Git 对象 ID 和入站请求策略；
-- `api`：强类型、与 Jenkins Job 行为无关的 CNB OpenAPI 客户端；
+- `api`：基于 Ktor Client 3.5.1 与 ContentNegotiation 的强类型 CNB OpenAPI 客户端；
 - `scm`：SCM Source/Navigator、head、revision、Trait、probe 和 GitSCM 装配；
 - `webhook`、`trigger`：签名事件规范化、防重放、SCM event 和传统 Job Cause；
 - `status`、`pipeline`、`publisher`：构建 metadata 生命周期与显式用户操作；
@@ -16,14 +16,30 @@ API 客户端只接受插件自己构造的相对路径。Server endpoint 在配
 payload 和 API response 中的 endpoint 不会成为新的请求 origin。每个 Server 独立维护并发限制、
 超时、退避、限流和 circuit 状态。
 
-普通 OpenAPI 请求禁止重定向。仓库动态、Release Asset 下载和 signed upload 是少数例外：每一跳
-都重新校验 URI、scheme、host、userinfo、fragment、地址类别和长度；离开 CNB API origin 后不再
-发送 Bearer Token。Release 上传确认 URL 还必须与配置的 API origin、仓库、Release ID 和确认
-路径精确一致。
+Ktor 统一负责 HTTP 执行、`HttpTimeout`、响应处理、流式 body 与 `HttpClient` 生命周期。
+Apache5 仅作为 Ktor 官方 JVM engine，不是第二套并列 transport。选用它是为了在实际 socket
+建连的 DNS resolver 中校验并返回同一组地址，消除先校验、后重新解析的窗口。
+
+公网模式要求 resolver 返回的每个地址都是 public unicast。私网模式显式放宽该地址策略，
+但仍由 Ktor Apache5 engine 发送请求，并通过 Jenkins `ProxyConfiguration` 应用 Controller 的代理
+策略；公网与私网模式共用同一 Ktor transport 和 engine 生命周期。
+
+Ktor 自动重定向关闭。仓库动态、Release Asset 下载和 signed upload 逐跳重新校验 URI、
+scheme、host、userinfo、fragment、地址类别和长度；离开 CNB API origin 后不再发送 Bearer
+Token。Release 上传确认 URL 还必须与配置的 API origin、仓库、Release ID 和确认路径精确一致。
 
 ## 强类型 JSON 边界
 
-所有 OpenAPI 请求和响应先经过私有 `kotlinx.serialization` Wire DTO，再映射到稳定领域模型。
+Ktor ContentNegotiation 注册共享的 `kotlinx.serialization` `Json` 策略。常规 2xx 单对象响应通过
+完整 `TypeInfo` 进入 Ktor converter 和私有 Wire DTO；分页、数组/Envelope 联合响应、错误体与下载
+仍显式保留原始字节，以便执行跨页字节计数、受限错误处理和流式写入。请求使用同一组生成的
+serializer 预编码，并在全部重试结束后清零缓冲。两条路径共享同一个严格 `Json` 实例，均不引入
+Jackson 或反射映射。Webhook 的精确原始 body 也使用同一 serializer 策略解码，但不经过出站
+HTTP 客户端。
+
+声明为 JSON 的单对象成功响应除 `204`、`205` 或明确的零长度外必须包含有效 JSON；未知长度的空
+chunked/HTTP/2 body 会 fail closed，而不会被静默当作一个缺失对象。分页和下载仍按原始流语义处理。
+
 未知字段可忽略以允许 CNB 向后兼容地增加字段；必需字段、枚举、完整 SHA、资源 ID、路径、URL、
 时间、计数和标量形状保持严格。未知枚举和冲突字段 fail closed。
 
@@ -88,9 +104,12 @@ Release metadata 与文件内容分离。列表和详情进入强类型领域模
 只在 transport 内部存活，不进入 build.xml、Pipeline 返回值或日志。
 
 上传使用可重复打开、固定长度的 workspace 输入流；源文件在每次尝试前核对大小，signed PUT 不带
-Bearer，也不会自动重放非幂等失败。下载直接写随机临时文件，同时限制 Content-Length 和实际字节
-数；成功后才在 Agent workspace 内执行 real-path 校验与原子 rename，失败则删除临时文件。覆盖
-现有目标和所有删除操作都要求用户显式确认。
+Bearer，也不会自动重放非幂等失败。Ktor 使用 `ByteReadChannel` 流式传输，不将 Asset
+整体物化为内存中的 `ByteArray` 或 JSON 值。
+
+下载直接写随机临时文件，同时限制 Content-Length 和实际字节数；成功后才在 Agent workspace
+内执行 real-path 校验与原子 rename，失败则删除临时文件。覆盖现有目标和所有删除操作都要求
+用户显式确认。
 
 ## 持久化与升级
 

@@ -70,14 +70,34 @@ jobs:
             | grep '^WEB-INF/lib/[^/]*$' \
             | LC_ALL=C sort > "$RUNNER_TEMP/cnb-libraries.txt"
           cat > "$RUNNER_TEMP/expected-libraries.txt" <<'EOF'
-          WEB-INF/lib/annotations-13.0.jar
+          WEB-INF/lib/annotations-26.1.0.jar
           WEB-INF/lib/cnb.jar
           WEB-INF/lib/httpclient5-5.6.2.jar
           WEB-INF/lib/httpcore5-5.4.3.jar
           WEB-INF/lib/httpcore5-h2-5.4.3.jar
           WEB-INF/lib/kotlin-stdlib-2.4.10.jar
+          WEB-INF/lib/kotlinx-coroutines-core-jvm-1.11.0.jar
+          WEB-INF/lib/kotlinx-coroutines-slf4j-1.11.0.jar
+          WEB-INF/lib/kotlinx-io-bytestring-jvm-0.9.0.jar
+          WEB-INF/lib/kotlinx-io-core-jvm-0.9.0.jar
           WEB-INF/lib/kotlinx-serialization-core-jvm-1.11.0.jar
+          WEB-INF/lib/kotlinx-serialization-json-io-jvm-1.11.0.jar
           WEB-INF/lib/kotlinx-serialization-json-jvm-1.11.0.jar
+          WEB-INF/lib/ktor-client-apache5-jvm-3.5.1.jar
+          WEB-INF/lib/ktor-client-content-negotiation-jvm-3.5.1.jar
+          WEB-INF/lib/ktor-client-core-jvm-3.5.1.jar
+          WEB-INF/lib/ktor-events-jvm-3.5.1.jar
+          WEB-INF/lib/ktor-http-cio-jvm-3.5.1.jar
+          WEB-INF/lib/ktor-http-jvm-3.5.1.jar
+          WEB-INF/lib/ktor-io-jvm-3.5.1.jar
+          WEB-INF/lib/ktor-network-jvm-3.5.1.jar
+          WEB-INF/lib/ktor-serialization-jvm-3.5.1.jar
+          WEB-INF/lib/ktor-serialization-kotlinx-json-jvm-3.5.1.jar
+          WEB-INF/lib/ktor-serialization-kotlinx-jvm-3.5.1.jar
+          WEB-INF/lib/ktor-sse-jvm-3.5.1.jar
+          WEB-INF/lib/ktor-utils-jvm-3.5.1.jar
+          WEB-INF/lib/ktor-websocket-serialization-jvm-3.5.1.jar
+          WEB-INF/lib/ktor-websockets-jvm-3.5.1.jar
           WEB-INF/lib/re2j-1.8.jar
           EOF
           diff -u "$RUNNER_TEMP/expected-libraries.txt" "$RUNNER_TEMP/cnb-libraries.txt"
