@@ -1,0 +1,40 @@
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          - cnbToken:
+              scope: GLOBAL
+              id: "cnb-scan-token"
+              description: "CNB read-only scan token"
+              token: "${CNB_SCAN_TOKEN}"
+          - string:
+              id: "cnb-webhook-secret"
+              description: "CNB webhook HMAC secret"
+              secret: "${CNB_WEBHOOK_SECRET}"
+          - string:
+              id: "cnb-reporting-token"
+              description: "CNB result-reporting token"
+              secret: "${CNB_REPORTING_TOKEN}"
+
+unclassified:
+  cnb:
+    organizationReconciliationEnabled: true
+    organizationReconciliationIntervalSeconds: 21600
+    servers:
+      - id: "cnb-cool"
+        name: "CNB Cool"
+        webUrl: "https://cnb.cool"
+        apiUrl: "https://api.cnb.cool"
+        credentialsId: "cnb-scan-token"
+        reportingCredentialsId: "cnb-reporting-token"
+        webhookCredentials:
+          - repositoryPath: "acme/application"
+            secretCredentialsId: "cnb-webhook-secret"
+        allowInsecureHttp: false
+        allowPrivateNetwork: false
+        eventPollingEnabled: true
+        eventPollingIntervalSeconds: 120
+        maxWebhookAgeSeconds: 900
+        connectTimeoutSeconds: 10
+        requestTimeoutSeconds: 30
+        statusReportingMode: "BOTH"
