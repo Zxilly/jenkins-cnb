@@ -79,8 +79,8 @@ jobs:
           WEB-INF/lib/kotlin-stdlib-2.4.10.jar
           WEB-INF/lib/kotlinx-coroutines-core-jvm-1.11.0.jar
           WEB-INF/lib/kotlinx-coroutines-slf4j-1.11.0.jar
-          WEB-INF/lib/kotlinx-io-bytestring-jvm-0.9.0.jar
-          WEB-INF/lib/kotlinx-io-core-jvm-0.9.0.jar
+          WEB-INF/lib/kotlinx-io-bytestring-jvm-0.9.1.jar
+          WEB-INF/lib/kotlinx-io-core-jvm-0.9.1.jar
           WEB-INF/lib/kotlinx-serialization-core-jvm-1.11.0.jar
           WEB-INF/lib/kotlinx-serialization-json-io-jvm-1.11.0.jar
           WEB-INF/lib/kotlinx-serialization-json-jvm-1.11.0.jar
