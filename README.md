@@ -20,7 +20,7 @@ Organization Folder，并以 CNB 当前公开 OpenAPI 的能力为边界。
 - 按最小权限创建的 CNB 访问令牌；
 - 生产环境的 CNB Web/API、Jenkins Webhook 和 Git checkout 端点全部使用 HTTPS；
 - Git、SCM API、Branch API、Credentials、Plain Credentials、Pipeline Multibranch 和
-  Pipeline Step API 等依赖插件；安装 HPI 时 Jenkins 会自动解析这些依赖。
+  Pipeline Step API 等依赖插件；从本地上传 HPI 前必须先安装其 Manifest 声明的依赖。
 
 ## 主要能力
 
@@ -85,8 +85,23 @@ CNB 当前公开 OpenAPI 没有 Webhook CRUD、原生 Commit Status/Check 写接
 ./mvnw -B -ntp clean verify
 ```
 
-构建产物为 `target/cnb.hpi`。在 Jenkins 中打开 **Manage Jenkins → Plugins → Advanced
-settings → Deploy Plugin** 上传，然后重启 Controller。
+构建产物为 `target/cnb.hpi`。本插件进入 Jenkins Update Center 之前，手动上传 HPI 不会从
+Update Center 自动补齐依赖。容器部署建议先用官方 Plugin Installation Manager 安装 Manifest
+列出的直接依赖及其传递依赖，再复制 HPI：
+
+```dockerfile
+FROM jenkins/jenkins:2.568.1-jdk21
+
+RUN jenkins-plugin-cli --plugins \
+    "workflow-multibranch workflow-step-api branch-api cloudbees-folder \
+     credentials-binding credentials git-client git plain-credentials scm-api structs"
+
+COPY --chown=jenkins:jenkins target/cnb.hpi /usr/share/jenkins/ref/plugins/cnb.jpi
+```
+
+非容器 Jenkins 可先在 **Manage Jenkins → Plugins** 安装同一组依赖，再到 **Advanced
+settings → Deploy Plugin** 上传 `cnb.hpi` 并重启 Controller。版本下限始终以发布 HPI 的
+`Plugin-Dependencies` Manifest 字段为准；生产镜像应在首次解析后固定实际安装版本。
 
 项目进入 `jenkinsci` 组织并发布到 Jenkins Update Center 之前，请从本仓库 Release 手动安装
 HPI。Release 会同时提供 SHA-256 和 GitHub/Sigstore 构建来源证明，可用以下命令验证：
@@ -346,7 +361,7 @@ Publisher，Pipeline 可调用 `cnbBuildMetadata`。`cnbSkipReporting` Trait 只
 
 项目使用 Jenkins LTS 2.541.3、Plugin Parent `6.2211.v27f680c93c53`、Jenkins BOM
 `6699.v4f03a_ff2f9c2`、Kotlin 2.4.10、Ktor Client 3.5.1（Apache5 engine、ContentNegotiation）、
-kotlinx.serialization 1.11.0、RE2/J 1.8、Maven 3.9.16（Wrapper 3.3.4）、ktlint 1.8.0 和
+kotlinx.serialization 1.11.0、kotlinx-io 0.9.1、RE2/J 1.8、Maven 3.9.16（Wrapper 3.3.4）、ktlint 1.8.0 和
 JaCoCo 0.8.15，生成 Java 17 bytecode，并在 Java 17/21/25 与 Windows/Linux 上运行 CI。每次
 `verify` 都会执行单元测试和 Jenkins Test Harness 集成测试，
 包括 JCasC、Jenkins 重启持久化、Webhook/队列、SCM Source、Pipeline 与安全失败路径，生成
