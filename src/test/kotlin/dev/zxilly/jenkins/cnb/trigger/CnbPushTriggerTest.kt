@@ -60,11 +60,38 @@ class CnbPushTriggerTest {
         assertFalse(trigger.isCancelRunningBuildsOnUpdate())
         assertTrue(trigger.isCiSkip())
         assertFalse(trigger.isTriggerOnlyIfNewCommitsPushed())
+        assertEquals("never", trigger.getTriggerOpenPullRequestOnPush())
         assertEquals("", trigger.getRequiredPullRequestLabels())
         assertEquals("", trigger.getExcludedPullRequestLabels())
         assertEquals("", trigger.getCommentPattern())
         assertEquals("Developer", trigger.getCommentMinimumRole())
         assertFalse(trigger.matches(pullRequestDelivery(CnbWebhookEvent.PULL_REQUEST_COMMENT)))
+    }
+
+    @Test
+    fun `open pull request push mode accepts stable wire values`() {
+        val trigger = CnbPushTrigger("cnb-cool", "team/project", "**")
+
+        for (mode in listOf("never", "source", "both")) {
+            trigger.setTriggerOpenPullRequestOnPush(mode)
+            assertEquals(mode, trigger.getTriggerOpenPullRequestOnPush())
+        }
+
+        assertThrows(IllegalArgumentException::class.java) {
+            trigger.setTriggerOpenPullRequestOnPush("all")
+        }
+    }
+
+    @Test
+    fun `source and both modes enable authoritative pull request target events`() {
+        val trigger = CnbPushTrigger("cnb-cool", "team/project", "**")
+        val delivery = pullRequestDelivery(CnbWebhookEvent.PULL_REQUEST_TARGET)
+
+        assertFalse(trigger.matches(delivery))
+        trigger.setTriggerOpenPullRequestOnPush("source")
+        assertTrue(trigger.matches(delivery))
+        trigger.setTriggerOpenPullRequestOnPush("both")
+        assertTrue(trigger.matches(delivery))
     }
 
     @Test
@@ -267,6 +294,7 @@ class CnbPushTriggerTest {
         trigger.setCancelRunningBuildsOnUpdate(true)
         trigger.setCiSkip(false)
         trigger.setTriggerOnlyIfNewCommitsPushed(true)
+        trigger.setTriggerOpenPullRequestOnPush("both")
         trigger.setRequiredPullRequestLabels("ci, ready")
         trigger.setExcludedPullRequestLabels("skip")
         trigger.setCommentPattern("rebuild(?:\\s+please)?")
@@ -286,6 +314,7 @@ class CnbPushTriggerTest {
         assertTrue(restored.isCancelRunningBuildsOnUpdate())
         assertFalse(restored.isCiSkip())
         assertTrue(restored.isTriggerOnlyIfNewCommitsPushed())
+        assertEquals("both", restored.getTriggerOpenPullRequestOnPush())
         assertEquals("ci,ready", restored.getRequiredPullRequestLabels())
         assertEquals("skip", restored.getExcludedPullRequestLabels())
         assertEquals("rebuild(?:\\s+please)?", restored.getCommentPattern())
@@ -302,6 +331,7 @@ class CnbPushTriggerTest {
         setSerializedField(unsafe, "configuredExcludedPullRequestLabels", "ready")
         setSerializedField(unsafe, "configuredCommentPattern", "(?=rebuild)")
         setSerializedField(unsafe, "configuredCommentMinimumRole", "Guest")
+        setSerializedField(unsafe, "configuredTriggerOpenPullRequestOnPush", "all")
 
         val restored = Jenkins.XSTREAM2.fromXML(Jenkins.XSTREAM2.toXML(unsafe)) as CnbPushTrigger
 
@@ -309,6 +339,7 @@ class CnbPushTriggerTest {
         assertEquals("", restored.getExcludedPullRequestLabels())
         assertEquals("", restored.getCommentPattern())
         assertEquals("Developer", restored.getCommentMinimumRole())
+        assertEquals("never", restored.getTriggerOpenPullRequestOnPush())
         assertFalse(restored.matches(pullRequestDelivery(CnbWebhookEvent.PULL_REQUEST_UPDATE)))
         assertFalse(restored.matches(pullRequestDelivery(CnbWebhookEvent.PULL_REQUEST_COMMENT)))
 
@@ -318,12 +349,14 @@ class CnbPushTriggerTest {
         setSerializedField(legacy, "configuredCommentPattern", null)
         setSerializedField(legacy, "configuredCommentMinimumRole", null)
         setSerializedField(legacy, "configuredCiSkip", null)
+        setSerializedField(legacy, "configuredTriggerOpenPullRequestOnPush", null)
         val legacyRestored = Jenkins.XSTREAM2.fromXML(Jenkins.XSTREAM2.toXML(legacy)) as CnbPushTrigger
         assertEquals("", legacyRestored.getRequiredPullRequestLabels())
         assertEquals("", legacyRestored.getExcludedPullRequestLabels())
         assertEquals("", legacyRestored.getCommentPattern())
         assertEquals("Developer", legacyRestored.getCommentMinimumRole())
         assertTrue(legacyRestored.isCiSkip())
+        assertEquals("never", legacyRestored.getTriggerOpenPullRequestOnPush())
         assertTrue(legacyRestored.matches(delivery("main", SHA_A)))
     }
 

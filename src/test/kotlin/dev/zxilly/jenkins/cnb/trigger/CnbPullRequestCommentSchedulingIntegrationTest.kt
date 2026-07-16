@@ -54,6 +54,31 @@ import java.time.Instant
 @WithJenkins
 class CnbPullRequestCommentSchedulingIntegrationTest {
     @Test
+    fun `target branch push advertises verified pull request revisions only to opted in multibranch sources`(jenkins: JenkinsRule) {
+        val project =
+            jenkins.jenkins.createProject(
+                WorkflowMultiBranchProject::class.java,
+                "target-push",
+            )
+        val source = TestCnbSCMSource(::targetPushClient)
+        source.withId("target-push-source")
+        source.setTraits(listOf(CnbOriginPullRequestDiscoveryTrait(2)))
+        project.sourcesList.add(BranchSource(source))
+        source.setOwner(project)
+
+        val deliveries =
+            CnbVerifiedWebhookPlanner.targetPushPullRequests(pushDelivery()) { _, _ ->
+                targetPushClient()
+            }
+
+        val delivery = deliveries.single()
+        assertEquals(CnbWebhookEvent.PULL_REQUEST_TARGET, delivery.payload.event)
+        val revision = CnbSCMHeadEvent(delivery).heads(source).values.single() as dev.zxilly.jenkins.cnb.scm.CnbPullRequestSCMRevision
+        assertEquals(SOURCE_SHA, revision.headHash)
+        assertEquals(TARGET_SHA, revision.baseHash)
+    }
+
+    @Test
     fun `live authorized comment schedules only the existing PR child that still passes source policy`(jenkins: JenkinsRule) {
         jenkins.jenkins.numExecutors = 0
         var readyLabel = false
@@ -154,6 +179,51 @@ class CnbPullRequestCommentSchedulingIntegrationTest {
             }
         }
 
+    private fun targetPushClient(): CnbClient =
+        Proxy.newProxyInstance(
+            CnbClient::class.java.classLoader,
+            arrayOf(CnbClient::class.java),
+        ) { _, method, arguments ->
+            val args = arguments.orEmpty()
+            when (method.name) {
+                "getCapabilities" -> {
+                    CnbApiCapabilities()
+                }
+
+                "listPullRequests" -> {
+                    listOf(livePullRequest())
+                }
+
+                "getPullRequest" -> {
+                    livePullRequest()
+                }
+
+                "getBranch" -> {
+                    if (args[1] == "main") {
+                        CnbBranch("main", TARGET_SHA)
+                    } else {
+                        CnbBranch("feature/change", SOURCE_SHA)
+                    }
+                }
+
+                "getRepository" -> {
+                    repository()
+                }
+
+                "close" -> {
+                    Unit
+                }
+
+                "toString" -> {
+                    "CnbPullRequestTargetPushIntegrationTestClient"
+                }
+
+                else -> {
+                    unsupported(method.name)
+                }
+            }
+        } as CnbClient
+
     private fun clientProxy(result: (String) -> Any?): CnbClient =
         Proxy.newProxyInstance(
             CnbClient::class.java.classLoader,
@@ -232,6 +302,20 @@ class CnbPullRequestCommentSchedulingIntegrationTest {
             ),
             "test",
         )
+
+    private fun pushDelivery(): CnbWebhookDelivery =
+        commentDelivery().let { delivery ->
+            delivery.copy(
+                payload =
+                    delivery.payload.copy(
+                        deliveryId = "target-push-delivery",
+                        event = CnbWebhookEvent.PUSH,
+                        eventUrl = "",
+                        ref = CnbWebhookRef("main", TARGET_SHA, "c".repeat(40), TARGET_SHA, false),
+                        pullRequest = null,
+                    ),
+            )
+        }
 
     private class TestCnbSCMSource(
         private val openClient: () -> CnbClient,

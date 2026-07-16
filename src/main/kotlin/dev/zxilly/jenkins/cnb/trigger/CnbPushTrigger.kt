@@ -34,6 +34,25 @@ import java.util.Locale
 import java.util.logging.Level
 import java.util.logging.Logger
 
+internal enum class CnbOpenPullRequestPushMode(
+    val wireName: String,
+) {
+    NEVER("never"),
+    SOURCE("source"),
+    BOTH("both"),
+    ;
+
+    companion object {
+        fun parse(value: String?): CnbOpenPullRequestPushMode {
+            val normalized = value.orEmpty().trim().lowercase(Locale.ROOT)
+            return entries.firstOrNull { it.wireName == normalized }
+                ?: throw IllegalArgumentException("Unsupported open pull request push mode")
+        }
+
+        fun parseOrNever(value: String?): CnbOpenPullRequestPushMode = runCatching { parse(value) }.getOrDefault(NEVER)
+    }
+}
+
 class CnbPushTrigger
     @DataBoundConstructor
     constructor(
@@ -56,6 +75,7 @@ class CnbPushTrigger
         private var configuredCancelRunningBuildsOnUpdate: Boolean = false
         private var configuredCiSkip: Boolean? = true
         private var configuredTriggerOnlyIfNewCommitsPushed: Boolean = false
+        private var configuredTriggerOpenPullRequestOnPush: String? = CnbOpenPullRequestPushMode.NEVER.wireName
 
         init {
             require(SERVER_ID_PATTERN.matches(this.serverId)) { "Invalid CNB server ID" }
@@ -162,13 +182,27 @@ class CnbPushTrigger
             configuredTriggerOnlyIfNewCommitsPushed = value
         }
 
+        fun getTriggerOpenPullRequestOnPush(): String =
+            CnbOpenPullRequestPushMode.parseOrNever(configuredTriggerOpenPullRequestOnPush).wireName
+
+        internal fun openPullRequestPushMode(): CnbOpenPullRequestPushMode =
+            CnbOpenPullRequestPushMode.parseOrNever(configuredTriggerOpenPullRequestOnPush)
+
+        @DataBoundSetter
+        fun setTriggerOpenPullRequestOnPush(value: String?) {
+            configuredTriggerOpenPullRequestOnPush =
+                CnbOpenPullRequestPushMode
+                    .parse(value.orEmpty().ifBlank { CnbOpenPullRequestPushMode.NEVER.wireName })
+                    .wireName
+        }
+
         /** Backwards-compatible constructor field, exposed as the general ref glob. */
         fun getRefFilter(): String = branchFilter.ifBlank { DEFAULT_REF_FILTER }
 
         fun matches(delivery: CnbWebhookDelivery): Boolean {
             val payload = delivery.payload
             if (delivery.serverId != serverId || payload.repository.slug != repositoryPath) return false
-            if (!CnbEventFilter.matches(getEventFilter(), payload.event)) return false
+            if (!matchesConfiguredEvent(payload.event)) return false
             if (!CnbRefGlob.matches(getRefFilter(), payload.ref.name)) return false
             val pullRequest = payload.pullRequest
             if (payload.event.pullRequestEvent) {
@@ -181,6 +215,20 @@ class CnbPushTrigger
             ) {
                 return false
             }
+            return CnbQueueIdentity.from(delivery) != null
+        }
+
+        private fun matchesConfiguredEvent(event: CnbWebhookEvent): Boolean =
+            CnbEventFilter.matches(getEventFilter(), event) ||
+                (event == CnbWebhookEvent.PULL_REQUEST_TARGET && openPullRequestPushMode() != CnbOpenPullRequestPushMode.NEVER)
+
+        internal fun expandsOpenPullRequestsFor(delivery: CnbWebhookDelivery): Boolean {
+            val payload = delivery.payload
+            if (openPullRequestPushMode() != CnbOpenPullRequestPushMode.BOTH) return false
+            if (delivery.serverId != serverId || payload.repository.slug != repositoryPath) return false
+            if (payload.event !in TARGET_PUSH_EVENTS || payload.ref.tag || payload.pullRequest != null) return false
+            if (!CnbRefGlob.matches(getRefFilter(), payload.ref.name)) return false
+            if (!CnbRefGlob.matches(getTargetBranchFilter(), payload.ref.name)) return false
             return CnbQueueIdentity.from(delivery) != null
         }
 
@@ -216,7 +264,7 @@ class CnbPushTrigger
 
         internal fun isEligible(delivery: CnbWebhookDelivery): Boolean {
             val target = job ?: return false
-            return target.isBuildable && matches(delivery)
+            return target.isBuildable && (matches(delivery) || expandsOpenPullRequestsFor(delivery))
         }
 
         internal fun shouldCancelRunningBuildsFor(delivery: CnbWebhookDelivery): Boolean {
@@ -309,6 +357,8 @@ class CnbPushTrigger
                 runCatching {
                     CnbEventFilter.normalize(configuredEventFilter.orEmpty().ifBlank { DEFAULT_EVENT_FILTER })
                 }.getOrDefault(DEFAULT_EVENT_FILTER)
+            configuredTriggerOpenPullRequestOnPush =
+                CnbOpenPullRequestPushMode.parseOrNever(configuredTriggerOpenPullRequestOnPush).wireName
             var pullRequestPoliciesValid = true
             configuredSourceBranchFilter =
                 runCatching { normalizeRefFilter(configuredSourceBranchFilter) }
@@ -452,6 +502,13 @@ class CnbPushTrigger
             fun doFillCommentMinimumRoleItems(): ListBoxModel =
                 ListBoxModel().apply {
                     DEFAULT_COMMENT_ROLE_ORDER.forEach { role -> add(role.displayName, role.wireName) }
+                }
+
+            fun doFillTriggerOpenPullRequestOnPushItems(): ListBoxModel =
+                ListBoxModel().apply {
+                    add("Never", CnbOpenPullRequestPushMode.NEVER.wireName)
+                    add("Source branch updates", CnbOpenPullRequestPushMode.SOURCE.wireName)
+                    add("Source and target branch updates", CnbOpenPullRequestPushMode.BOTH.wireName)
                 }
 
             @POST
@@ -609,6 +666,7 @@ class CnbPushTrigger
             private fun isPresentObjectId(value: String): Boolean = CnbGitObjectId.isPresent(value)
 
             private val DELETION_CAPABLE_EVENTS = setOf(CnbWebhookEvent.BRANCH_DELETE, CnbWebhookEvent.TAG_PUSH)
+            private val TARGET_PUSH_EVENTS = setOf(CnbWebhookEvent.PUSH, CnbWebhookEvent.COMMIT_ADD)
             private val EXPLICIT_PULL_REQUEST_UPDATE_ACTIONS = setOf("update", "synchronize")
             private val DEFAULT_COMMENT_ROLE_ORDER =
                 listOf(

@@ -18,6 +18,9 @@
   <f:entry title="${%Pull request target branch filter}" field="targetBranchFilter">
     <f:textbox default="**" />
   </f:entry>
+  <f:entry title="${%Build open pull requests on branch pushes}" field="triggerOpenPullRequestOnPush">
+    <f:select />
+  </f:entry>
   <f:entry title="${%Include draft pull requests}" field="includeDraftPullRequests">
     <f:checkbox />
   </f:entry>

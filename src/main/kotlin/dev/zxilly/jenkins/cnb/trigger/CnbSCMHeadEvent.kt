@@ -63,12 +63,16 @@ internal object JenkinsCnbWebhookDispatcher : CnbWebhookDispatcher {
         // one immutable API snapshot; each multibranch source uses its item-scoped credential.
         val verified = ArrayList<CnbVerifiedQueueCandidate>()
         verified += CnbVerifiedWebhookPlanner.classic(delivery, classicTriggers)
+        val targetPushPullRequests = CnbVerifiedWebhookPlanner.targetPushPullRequests(delivery)
         if (delivery.payload.event == CnbWebhookEvent.PULL_REQUEST_COMMENT) {
             verified += CnbVerifiedWebhookPlanner.pullRequestComment(delivery)
         } else {
             // Comment builds are an explicit trait/trigger operation. Sending them through the
             // generic SCM event path would bypass that opt-in and may schedule the wrong child.
             SCMHeadEvent.fireNow(CnbSCMHeadEvent(delivery))
+            for (pullRequest in targetPushPullRequests) {
+                SCMHeadEvent.fireNow(CnbSCMHeadEvent(pullRequest))
+            }
         }
         val scheduled = CnbAtomicQueueScheduler.schedule(verified)
         LOGGER.log(

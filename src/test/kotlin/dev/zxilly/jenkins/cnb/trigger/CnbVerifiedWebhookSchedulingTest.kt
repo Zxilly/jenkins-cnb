@@ -3,6 +3,7 @@ package dev.zxilly.jenkins.cnb.trigger
 import dev.zxilly.jenkins.cnb.api.CnbApiException
 import dev.zxilly.jenkins.cnb.api.CnbClient
 import dev.zxilly.jenkins.cnb.api.model.CnbApiCapabilities
+import dev.zxilly.jenkins.cnb.api.model.CnbBranch
 import dev.zxilly.jenkins.cnb.api.model.CnbCommit
 import dev.zxilly.jenkins.cnb.api.model.CnbLabel
 import dev.zxilly.jenkins.cnb.api.model.CnbMemberAccess
@@ -10,6 +11,9 @@ import dev.zxilly.jenkins.cnb.api.model.CnbMemberAccessLevel
 import dev.zxilly.jenkins.cnb.api.model.CnbPullComment
 import dev.zxilly.jenkins.cnb.api.model.CnbPullRequest
 import dev.zxilly.jenkins.cnb.api.model.CnbPullRequestState
+import dev.zxilly.jenkins.cnb.api.model.CnbRepository
+import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryStatus
+import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryVisibility
 import dev.zxilly.jenkins.cnb.webhook.CnbWebhookActor
 import dev.zxilly.jenkins.cnb.webhook.CnbWebhookDelivery
 import dev.zxilly.jenkins.cnb.webhook.CnbWebhookEvent
@@ -19,6 +23,7 @@ import dev.zxilly.jenkins.cnb.webhook.CnbWebhookPullRequest
 import dev.zxilly.jenkins.cnb.webhook.CnbWebhookRef
 import dev.zxilly.jenkins.cnb.webhook.CnbWebhookRepository
 import hudson.model.Queue
+import hudson.plugins.git.RevisionParameterAction
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
@@ -29,6 +34,44 @@ import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
 
 class CnbVerifiedWebhookSchedulingTest {
+    @Test
+    @WithJenkins
+    fun `classic target push plans every verified open pull request with its source checkout`(jenkins: JenkinsRule) {
+        val enabledJob = jenkins.createFreeStyleProject("target-push-prs")
+        val disabledJob = jenkins.createFreeStyleProject("target-push-disabled")
+        val enabled =
+            CnbPushTrigger("primary", "team/project", "**").apply {
+                setEventFilter("tag_push")
+                setTriggerOpenPullRequestOnPush("both")
+                setCiSkip(false)
+            }
+        val disabled =
+            CnbPushTrigger("primary", "team/project", "**").apply {
+                setEventFilter("tag_push")
+                setTriggerOpenPullRequestOnPush("source")
+                setCiSkip(false)
+            }
+
+        val planned =
+            CnbVerifiedWebhookPlanner.classic(
+                pushDelivery(),
+                listOf(
+                    CnbClassicTriggerCandidate(enabledJob, enabled),
+                    CnbClassicTriggerCandidate(disabledJob, disabled),
+                ),
+                openClient = ::targetPushClient,
+            )
+
+        val candidate = planned.single()
+        assertEquals(enabledJob.fullName, candidate.job.fullName)
+        assertEquals(CnbWebhookEvent.PULL_REQUEST_TARGET, candidate.delivery.payload.event)
+        assertEquals(SHA_A, candidate.identity.sha)
+        assertEquals(SHA_C, candidate.identity.targetSha)
+        assertEquals(false, candidate.onlyIfNewPullRequestCommits)
+        val checkout = requireNotNull(candidate.checkoutAction)
+        assertEquals(SHA_A, checkout.commit)
+    }
+
     @Test
     @WithJenkins
     fun `classic jobs evaluate independent policies against one live snapshot`(jenkins: JenkinsRule) {
@@ -361,6 +404,59 @@ class CnbVerifiedWebhookSchedulingTest {
             }
         }
     }
+
+    private fun targetPushClient(): CnbClient =
+        Proxy.newProxyInstance(
+            CnbClient::class.java.classLoader,
+            arrayOf(CnbClient::class.java),
+        ) { _, method, arguments ->
+            val args = arguments.orEmpty()
+            when (method.name) {
+                "getCapabilities" -> {
+                    CnbApiCapabilities()
+                }
+
+                "getBranch" -> {
+                    when ("${args[0]}:${args[1]}") {
+                        "team/project:main" -> CnbBranch("main", SHA_C)
+                        "alice/project:feature/change" -> CnbBranch("feature/change", SHA_A)
+                        else -> throw UnsupportedOperationException("unexpected branch ${args.toList()}")
+                    }
+                }
+
+                "listPullRequests" -> {
+                    listOf(livePullRequest().copy(sourceRepo = "alice/project"))
+                }
+
+                "getPullRequest" -> {
+                    livePullRequest().copy(sourceRepo = "alice/project")
+                }
+
+                "getRepository" -> {
+                    CnbRepository(
+                        path = "alice/project",
+                        name = "project",
+                        webUrl = "https://cnb.cool/alice/project",
+                        cloneUrl = "https://cnb.cool/alice/project.git",
+                        defaultBranch = "main",
+                        status = CnbRepositoryStatus.OK,
+                        visibility = CnbRepositoryVisibility.PUBLIC,
+                    )
+                }
+
+                "close" -> {
+                    Unit
+                }
+
+                "toString" -> {
+                    "CnbVerifiedWebhookSchedulingTargetPushClient"
+                }
+
+                else -> {
+                    throw UnsupportedOperationException(method.name)
+                }
+            }
+        } as CnbClient
 
     private fun commentClient(
         author: String,

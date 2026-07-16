@@ -19,6 +19,7 @@ data class CnbQueueIdentity(
     val repositoryPath: String,
     val ref: String,
     val sha: String,
+    val targetSha: String? = null,
 ) : Serializable {
     companion object {
         private const val serialVersionUID = 1L
@@ -36,7 +37,18 @@ data class CnbQueueIdentity(
                     }
             val sha = pullRequest?.sourceSha ?: effectiveObjectId(payload.ref.commit, payload.ref.sha, payload.ref.before)
             if (repositoryPath.isEmpty() || ref.isEmpty() || !CnbGitObjectId.isPresent(sha)) return null
-            return CnbQueueIdentity(delivery.serverId, repositoryPath, ref, CnbGitObjectId.canonical(sha))
+            val targetSha =
+                pullRequest
+                    ?.targetSha
+                    ?.takeIf(CnbGitObjectId::isPresent)
+                    ?.let(CnbGitObjectId::canonical)
+            return CnbQueueIdentity(
+                delivery.serverId,
+                repositoryPath,
+                ref,
+                CnbGitObjectId.canonical(sha),
+                targetSha,
+            )
         }
 
         private fun effectiveObjectId(
@@ -67,6 +79,8 @@ class CnbQueueAction(
         get() = identity.ref
     val sha: String
         get() = identity.sha
+    val targetSha: String?
+        get() = identity.targetSha
 
     override fun shouldSchedule(actions: List<Action>): Boolean {
         for (action in actions) {
@@ -79,7 +93,7 @@ class CnbQueueAction(
         identity.serverId == incoming.serverId &&
             identity.repositoryPath == incoming.repositoryPath &&
             identity.ref == incoming.ref &&
-            identity.sha != incoming.sha
+            (identity.sha != incoming.sha || identity.targetSha != incoming.targetSha)
 
     companion object {
         private const val serialVersionUID = 1L
@@ -140,7 +154,7 @@ internal object CnbRunningBuilds {
             previous.serverId == incoming.serverId &&
             previous.repositoryPath == incoming.repositoryPath &&
             previous.ref == incoming.ref &&
-            previous.sha != incoming.sha
+            (previous.sha != incoming.sha || previous.targetSha != incoming.targetSha)
 
     private fun isPullRequestRef(value: String): Boolean {
         if (!value.startsWith("refs/pull/") || !value.endsWith("/head")) return false

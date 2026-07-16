@@ -46,6 +46,20 @@ class CnbQueueActionTest {
     }
 
     @Test
+    fun `pull request identity includes target revision for deduplication and supersession`() {
+        val original = requireNotNull(CnbQueueIdentity.from(pullRequestDelivery(SHA_A, SHA_C)))
+        val sameSnapshot = requireNotNull(CnbQueueIdentity.from(pullRequestDelivery(SHA_A, SHA_C)))
+        val newTarget = requireNotNull(CnbQueueIdentity.from(pullRequestDelivery(SHA_A, SHA_D)))
+
+        assertEquals(SHA_A, original.sha)
+        assertEquals(SHA_C, original.targetSha)
+        assertFalse(CnbQueueAction(sameSnapshot).shouldSchedule(listOf(CnbQueueAction(original))))
+        assertTrue(CnbQueueAction(newTarget).shouldSchedule(listOf(CnbQueueAction(original))))
+        assertTrue(CnbQueueAction(original).isSupersededBy(newTarget))
+        assertTrue(CnbRunningBuilds.isSupersededPullRequestRevision(original, newTarget))
+    }
+
+    @Test
     fun `branch and tag with the same name retain independent queue and supersession scopes`() {
         val branch = requireNotNull(CnbQueueIdentity.from(delivery("v1", SHA_A)))
         val tagDelivery =
@@ -230,7 +244,10 @@ class CnbQueueActionTest {
             "test",
         )
 
-    private fun pullRequestDelivery(sourceSha: String): CnbWebhookDelivery =
+    private fun pullRequestDelivery(
+        sourceSha: String,
+        targetSha: String = SHA_C,
+    ): CnbWebhookDelivery =
         CnbWebhookDelivery(
             "primary",
             CnbWebhookPayload(
@@ -245,7 +262,7 @@ class CnbQueueActionTest {
                 CnbWebhookInstance("https://cnb.cool", "https://api.cnb.cool"),
                 CnbWebhookRepository("repo-1", "team/project", "https://cnb.cool/team/project"),
                 CnbWebhookActor("user-1", "alice", "Alice", ""),
-                CnbWebhookRef("main", SHA_C, SHA_A, SHA_C, false),
+                CnbWebhookRef("main", targetSha, SHA_A, targetSha, false),
                 CnbWebhookPullRequest(
                     id = "pr-7",
                     number = "7",
@@ -256,7 +273,7 @@ class CnbQueueActionTest {
                     sourceBranch = "feature/change",
                     sourceSha = sourceSha,
                     targetBranch = "main",
-                    targetSha = SHA_C,
+                    targetSha = targetSha,
                     mergeSha = null,
                     action = "synchronize",
                     wip = false,
@@ -281,5 +298,6 @@ class CnbQueueActionTest {
         private val SHA_A = "a".repeat(40)
         private val SHA_B = "b".repeat(40)
         private val SHA_C = "c".repeat(40)
+        private val SHA_D = "d".repeat(40)
     }
 }
