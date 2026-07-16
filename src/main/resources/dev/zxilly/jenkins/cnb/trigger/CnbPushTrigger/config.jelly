@@ -27,6 +27,9 @@
   <f:entry title="${%Skip commits with CI skip markers}" field="ciSkip">
     <f:checkbox default="true" />
   </f:entry>
+  <f:entry title="${%Set the build description from the CNB cause}" field="setBuildDescription">
+    <f:checkbox default="true" />
+  </f:entry>
   <f:entry title="${%Build pull requests only for a new source revision}" field="triggerOnlyIfNewCommitsPushed">
     <f:checkbox />
   </f:entry>

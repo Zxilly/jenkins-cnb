@@ -75,6 +75,7 @@ class CnbPushTrigger
         private var configuredCancelPendingBuildsOnUpdate: Boolean = false
         private var configuredCancelRunningBuildsOnUpdate: Boolean = false
         private var configuredCiSkip: Boolean? = true
+        private var configuredSetBuildDescription: Boolean? = true
         private var configuredTriggerOnlyIfNewCommitsPushed: Boolean = false
         private var configuredTriggerOpenPullRequestOnPush: String? = CnbOpenPullRequestPushMode.NEVER.wireName
 
@@ -174,6 +175,13 @@ class CnbPushTrigger
         @DataBoundSetter
         fun setCiSkip(value: Boolean) {
             configuredCiSkip = value
+        }
+
+        fun isSetBuildDescription(): Boolean = configuredSetBuildDescription ?: true
+
+        @DataBoundSetter
+        fun setSetBuildDescription(value: Boolean) {
+            configuredSetBuildDescription = value
         }
 
         fun isTriggerOnlyIfNewCommitsPushed(): Boolean = configuredTriggerOnlyIfNewCommitsPushed
