@@ -1,0 +1,16 @@
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core" xmlns:f="lib/form">
+  <f:entry title="Action" field="action"><f:select /></f:entry>
+  <f:entry title="CNB server" field="serverId"><f:select /></f:entry>
+  <f:entry title="Repository" field="repository"><f:textbox /></f:entry>
+  <f:entry title="Pull request number" field="pullRequestNumber"><f:textbox /></f:entry>
+  <f:entry title="Pull request source SHA" field="sha"><f:textbox checkMethod="post" /></f:entry>
+  <f:entry title="API credentials" field="credentialsId"><f:select /></f:entry>
+  <f:entry title="Comment or review body" field="body"><f:textarea /></f:entry>
+  <f:entry title="Review action" field="reviewAction"><f:select /></f:entry>
+  <f:entry title="Merge method" field="mergeMethod"><f:select /></f:entry>
+  <f:entry title="Merge commit title" field="commitTitle"><f:textbox /></f:entry>
+  <f:entry title="Merge commit message" field="commitMessage"><f:textarea /></f:entry>
+  <f:entry title="Confirm dangerous action" field="confirmDangerousAction"><f:checkbox /></f:entry>
+  <f:entry title="Only run after a successful build" field="onlyOnSuccess"><f:checkbox /></f:entry>
+</j:jelly>

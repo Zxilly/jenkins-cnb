@@ -1,0 +1,8 @@
+<div>
+  对 CNB 拉取请求发表评论、提交评审或执行合并。评审批准、要求修改和合并属于危险操作，
+  必须显式勾选“Confirm dangerous action”，并解析到完整的拉取请求源 SHA。校验或 CNB API 失败会使 Jenkins 构建失败。
+  写入前预检会比较 CNB 当前源 SHA，但 CNB API 不提供原子的 expected-SHA/CAS 写入条件，所以只能缩小、不能消除极短的
+  TOCTOU 竞态；仍应启用 CNB 的拉取请求保护和合并规则。纯 PR comment 和不含行内评论的纯 review comment 不绑定 SHA。
+  “Only run after a successful build” 默认开启；构建为不稳定、失败、中止或未构建时不调用 CNB。关闭该选项后，
+  Publisher 会在非成功构建上仍执行；此时校验或 CNB API 失败仍会作为构建失败处理。
+</div>
