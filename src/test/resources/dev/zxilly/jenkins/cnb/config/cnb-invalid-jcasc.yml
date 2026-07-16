@@ -1,0 +1,7 @@
+unclassified:
+  cnb:
+    servers:
+      - id: "local"
+        name: "Local CNB"
+        webUrl: "http://127.0.0.1:8080"
+        apiUrl: "http://127.0.0.1:8081"
