@@ -2285,6 +2285,8 @@ class HttpCnbClientTest {
             )
             exchange.sendResponseHeaders(307, 0)
             try {
+                exchange.responseBody.write(byteArrayOf(1))
+                exchange.responseBody.flush()
                 releaseRedirectBody.await()
             } finally {
                 exchange.responseBody.close()
