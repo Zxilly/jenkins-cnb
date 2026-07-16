@@ -1,0 +1,7 @@
+<div>
+  默认关闭。启用后，仅当经过验证的 <code>pull_request.update</code>、
+  <code>pull_request.target</code> 事件，或带有明确 <code>update</code>/
+  <code>synchronize</code> 动作的基础拉取请求事件到达时，才会中止当前任务中 CNB
+  服务器、仓库、拉取请求引用相同但源提交不同的旧运行中构建。推送、评论、评审、其他任务和其他拉取请求的构建不会受影响。
+  Jenkins 会为每个被中止的构建保存可审计的中断原因。
+</div>

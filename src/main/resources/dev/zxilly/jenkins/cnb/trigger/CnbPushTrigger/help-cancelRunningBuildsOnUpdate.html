@@ -1,0 +1,8 @@
+<div>
+  Disabled by default. When enabled, a verified <code>pull_request.update</code> or
+  <code>pull_request.target</code> event (or a base pull-request event with an explicit
+  <code>update</code>/<code>synchronize</code> action) aborts only older running builds of this job
+  for the same CNB server, repository, pull-request ref, and a different source revision. Push,
+  comment, review, other-job, and other-pull-request builds are not interrupted. Jenkins records an
+  auditable interruption cause on every aborted build.
+</div>

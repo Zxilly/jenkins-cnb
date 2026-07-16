@@ -1,0 +1,48 @@
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core" xmlns:f="/lib/form">
+  <f:entry title="${%CNB server}" field="serverId">
+    <f:select />
+  </f:entry>
+  <f:entry title="${%Repository path}" field="repositoryPath">
+    <f:textbox />
+  </f:entry>
+  <f:entry title="${%Events}" field="eventFilter">
+    <f:textbox default="push,tag_push" />
+  </f:entry>
+  <f:entry title="${%Ref filter}" field="branchFilter">
+    <f:textbox default="**" />
+  </f:entry>
+  <f:entry title="${%Pull request source branch filter}" field="sourceBranchFilter">
+    <f:textbox default="**" />
+  </f:entry>
+  <f:entry title="${%Pull request target branch filter}" field="targetBranchFilter">
+    <f:textbox default="**" />
+  </f:entry>
+  <f:entry title="${%Include draft pull requests}" field="includeDraftPullRequests">
+    <f:checkbox />
+  </f:entry>
+  <f:entry title="${%Skip commits with CI skip markers}" field="ciSkip">
+    <f:checkbox default="true" />
+  </f:entry>
+  <f:entry title="${%Build pull requests only for a new source revision}" field="triggerOnlyIfNewCommitsPushed">
+    <f:checkbox />
+  </f:entry>
+  <f:entry title="${%Required pull request labels}" field="requiredPullRequestLabels">
+    <f:textbox />
+  </f:entry>
+  <f:entry title="${%Excluded pull request labels}" field="excludedPullRequestLabels">
+    <f:textbox />
+  </f:entry>
+  <f:entry title="${%Pull request comment pattern (RE2/J)}" field="commentPattern">
+    <f:textbox />
+  </f:entry>
+  <f:entry title="${%Minimum comment author role}" field="commentMinimumRole">
+    <f:select />
+  </f:entry>
+  <f:entry title="${%Cancel superseded pending builds}" field="cancelPendingBuildsOnUpdate">
+    <f:checkbox />
+  </f:entry>
+  <f:entry title="${%Cancel superseded running pull request builds}" field="cancelRunningBuildsOnUpdate">
+    <f:checkbox />
+  </f:entry>
+</j:jelly>

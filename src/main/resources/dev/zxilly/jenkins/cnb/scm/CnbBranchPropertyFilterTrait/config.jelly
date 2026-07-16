@@ -1,0 +1,9 @@
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core" xmlns:f="/lib/form">
+  <f:entry title="Protected branches" field="protectedStrategyId">
+    <f:select default="0"/>
+  </f:entry>
+  <f:entry title="Locked branches" field="lockedStrategyId">
+    <f:select default="0"/>
+  </f:entry>
+</j:jelly>

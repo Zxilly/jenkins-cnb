@@ -1,0 +1,27 @@
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core" xmlns:c="/lib/credentials" xmlns:f="/lib/form" xmlns:scm="/jenkins/scm/api/form">
+  <f:entry title="CNB server" field="serverId">
+    <f:select/>
+  </f:entry>
+  <f:entry title="Namespace" field="namespace">
+    <f:textbox/>
+  </f:entry>
+  <f:entry title="Discover every repository visible to the selected credentials" field="discoverAllRepositories">
+    <f:checkbox default="false"/>
+  </f:entry>
+  <f:entry title="API credentials" field="credentialsId">
+    <c:select/>
+  </f:entry>
+  <f:entry title="Checkout credentials" field="checkoutCredentialsId">
+    <c:select/>
+  </f:entry>
+  <f:entry title="Include descendant namespaces" field="includeDescendants">
+    <f:checkbox default="true"/>
+  </f:entry>
+  <f:entry title="Include archived repositories" field="includeArchivedRepositories">
+    <f:checkbox default="false"/>
+  </f:entry>
+  <f:entry title="Behaviours">
+    <scm:traits field="traits"/>
+  </f:entry>
+</j:jelly>
