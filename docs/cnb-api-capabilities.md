@@ -23,6 +23,7 @@ Wire DTO，再映射成领域模型。API、SCM、触发器和结果上报层不
 
 - 仓库路径、namespace、Git ref、40/64 位完整对象 ID、PR/Release/Asset/Build ID；
 - PR、Review、Commit Status、Build、Pipeline、Stage、可见性和仓库生命周期枚举；
+- Badge 名、`latest`/8 位短 SHA revision、同源 URL，以及可空数值与显式 `0`；
 - ISO-8601 时间、非负计数与持续时间、媒体类型、外部 URL、文件名和 workspace 相对路径。
 
 未知 JSON 字段会被忽略以兼容 CNB 增量扩展；未知枚举、非法标量和不满足语义约束的必需字段会
@@ -71,7 +72,10 @@ fail closed。
 | 能力 | CNB 公开 API | 插件行为 |
 |---|---|---|
 | 原生 Commit Status 读取 | Commit/PR status GET | Pipeline 只读查询，返回受控状态枚举 |
-| 原生 Commit Status 写入 | 无 POST/PUT/PATCH | **不支持，也不会用 Badge 伪装** |
+| 原生 Commit Status 写入 | 无 POST/PUT/PATCH | **不支持；独立 Badge 能力不会被伪装成原生状态** |
+| Badge 列表 | `GET /{repo}/-/badge/list` | `cnbBadges`；兼容 Swagger envelope 与线上裸数组，返回同源 README URL |
+| Badge JSON | `GET /{repo}/-/badge/git/{sha}/{badge}.json` | `cnbBadge`；`sha` 仅接受 `latest` 或 8 位短 SHA，可选 branch |
+| Badge 上传 | `POST /{repo}/-/badge/upload` | `cnbUploadBadge` 显式写入；非幂等失败不重试，保留 `value=null` 与显式 `0` 的差异 |
 | Commit annotations | GET/PUT/DELETE | 写入符合 CNB 字符约束的独立 `jenkins_..._` key；不覆盖其他生产者 |
 | Commit annotations 批量读取 | POST `commit-annotations-in-batch` | `cnbCommitAnnotations` 强类型只读步骤；1..20 个 40 位 SHA、最多 5 个过滤 key |
 | Tag annotations | GET/PUT/DELETE | Tag 构建写 Tag metadata，不污染 Commit key |
@@ -84,6 +88,11 @@ fail closed。
 
 CNB 没有可写的原生 Commit Status，因此 Jenkins 结果使用 PR 评论以及 Commit/Tag annotations。
 queued、running、final、重试和 Controller 重启恢复共享同一个持久化幂等状态机。
+
+Badge 是独立的 README/视觉展示能力：读取需要 `repo-commit-status:r`，上传需要
+`repo-commit-status:rw`。当前官方文档只明确列出可上传 key `security/tca`；插件校验 key 的路径结构，
+由 CNB 服务端执行动态 allowlist，不会硬编码或自动发布未文档化的 `jenkins/*` key。上传返回的
+Commit/latest URL 只允许落在配置的 CNB Web origin 和目标仓库 Badge 路径下。
 
 ## Release 与附件
 
@@ -152,7 +161,7 @@ Payload 和 API response 中提供的 endpoint 永远不会覆盖管理员配置
 - Issue、PR 富文本附件、知识库、workspace、AI 请求/用量、计费和 TAPD 操作；
 - 删除 CNB Build 日志、同步 CNB crontab；
 - 自动上传 Commit attachment；构建制品使用有生命周期和摘要字段的 Release Asset；
-- 用 `POST /badge/upload` 假冒 Jenkins 原生 Commit Status；
+- 以未文档化的 Badge key 自动发布 Jenkins 生命周期，或把 Badge 宣称为原生 Commit Status/合并门禁；
 - 自动创建 webhook 或 deployment：当前公开 Swagger 没有对应写接口。
 
 这些边界不会阻止以后增加独立、最小权限且可审计的扩展，但不会把一个生产 Jenkins Controller

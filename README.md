@@ -4,7 +4,7 @@
 [![Jenkins Security Scan](https://github.com/Zxilly/jenkins-cnb/actions/workflows/jenkins-security-scan.yml/badge.svg?branch=master)](https://github.com/Zxilly/jenkins-cnb/actions/workflows/jenkins-security-scan.yml)
 
 这是一个面向生产环境的 Jenkins 插件，用于集成 [CNB](https://cnb.cool) 代码仓库、Pull
-Request、仓库事件和构建结果。插件同时支持传统 Job、Pipeline、Multibranch Pipeline 和
+Request、仓库事件、构建结果和 Badge。插件同时支持传统 Job、Pipeline、Multibranch Pipeline 和
 Organization Folder，并以 CNB 当前公开 OpenAPI 的能力为边界。
 
 - Jenkins 插件短名称：`cnb`
@@ -40,6 +40,7 @@ Organization Folder，并以 CNB 当前公开 OpenAPI 的能力为边界。
 - 为传统 Job 和 Pipeline 提供 Cause、环境变量及分支/事件过滤；
 - 为 Classic 构建设置可关闭的 CNB Cause 描述，并将 changelog 中的 PR 与 Commit 变为 CNB 链接；
 - 通过 PR 评论与 Commit/Tag annotations 上报 Jenkins 排队、运行和最终结果；
+- 列出、读取和显式上传 CNB Badge，并返回可直接嵌入 README 的 Commit/latest URL；
 - 提供 PR、CNB Build、Release 及 Release Asset 的强类型 Pipeline 读写步骤；
 - 使用 Ktor Client 3.5.1、ContentNegotiation 和 `kotlinx.serialization` DTO 校验 CNB
   OpenAPI 与 Webhook 的 JSON 请求/响应边界；常规成功响应真实经过 Ktor converter，分页、错误体和
@@ -70,6 +71,7 @@ CNB 当前公开 OpenAPI 没有 Webhook CRUD、原生 Commit Status/Check 写接
 - 仓库事件由 `.cnb.yml` 调用官方 `cnbcool/webhook` 镜像转发到 Jenkins；
 - Jenkins 结果写入 PR 评论以及带 `jenkins_..._` 命名空间的 Commit/Tag annotations；
 - 原生 Commit Status 只读，可供 Pipeline 查询，但不能由 Jenkins 写入；
+- CNB Badge 可列出、读取和显式上传，用于 README/视觉展示，但不会被当作原生 Commit Status 或合并门禁；
 - Release/Asset 和 CNB Build 使用 CNB 已公开的强类型 API，但不会被包装成 Deployment；
 - 定期索引与仓库动态轮询作为一致性回退；SCM Source 会按代码/PR 动态刷新，传统 Job 只回补
   archive 强类型字段可精确重建的 Push/Tag 事件。
@@ -121,13 +123,15 @@ gh attestation verify cnb.hpi --repo Zxilly/jenkins-cnb
    成员权限；
 3. 结果上报：PR 评论需要 `repo-notes:rw`；Commit annotations 需要 `repo-code:rw`，Tag
    annotations 需要 `repo-release:rw`；批量只读 Commit annotations 至少需要 `repo-code:r`；
-4. 显式 PR 写操作：创建、更新、指派、Reviewer、标签和合并需要 `repo-pr:rw`，评论、评审、
+4. Badge：列出和读取需要 `repo-commit-status:r`，显式上传需要 `repo-commit-status:rw`；当前
+   官方文档明确列出的可上传 key 为 `security/tca`，最终允许集合由 CNB 服务端校验；
+5. 显式 PR 写操作：创建、更新、指派、Reviewer、标签和合并需要 `repo-pr:rw`，评论、评审、
    review comment 回复需要 `repo-notes:rw`；
-5. Release：查询需要 `repo-release:r`，创建、更新、删除及 Asset 上传/删除需要
+6. Release：查询需要 `repo-release:r`，创建、更新、删除及 Asset 上传/删除需要
    `repo-release:rw`；
-6. CNB Build：状态、Stage 和 Runner 日志下载需要 `repo-cnb-trigger:r`，启动/停止需要
+7. CNB Build：状态、Stage 和 Runner 日志下载需要 `repo-cnb-trigger:r`，启动/停止需要
    `repo-cnb-trigger:rw`，构建历史需要 `repo-cnb-history:r`；
-7. Webhook HMAC：每个仓库使用独立、至少 32 UTF-8 字节的高熵 Secret Text，不能复用 CNB
+8. Webhook HMAC：每个仓库使用独立、至少 32 UTF-8 字节的高熵 Secret Text，不能复用 CNB
    Token。
 
 不要授予 `repo-delete:rw`。本插件不会调用仓库删除、转移、成员管理等与 CI 集成无关的高风险
@@ -262,6 +266,27 @@ CNB_PULL_REQUEST_ACTION
 - `cnbCommitAnnotations`：以 `commitHashes` 批量查询 1 到 20 个完整 SHA，可选最多 5 个 `keys`，
   返回 `[{commitHash, annotations: [{key, value}]}]`。
 
+Badge symbols：
+
+- `cnbBadges`：列出仓库 Badge 定义和可嵌入 README 的 `url`；
+- `cnbBadge`：必填 `badge`，可选 `revision`（`latest` 或 8 位短 SHA）和 `branch`，以 JSON 返回
+  `color`、`label`、`message`、`link` 与 `links`；不存在时返回 `null`；
+- `cnbUploadBadge`：必填 `key`，使用当前上下文的完整 `sha`，`message` 与 `value` 至少提供一个；
+  可选 `link` 和 `latest`，返回 `url` 与 `latestUrl`。这是显式视觉展示操作，不会自动接入 Jenkins
+  生命周期，也不等同于 CNB 原生 Commit Status。
+
+```groovy
+def available = cnbBadges(repository: 'team/project')
+def current = cnbBadge(repository: 'team/project', badge: 'security/tca', revision: 'latest')
+def uploaded = cnbUploadBadge(
+  repository: 'team/project', sha: env.GIT_COMMIT,
+  key: 'security/tca', message: 'passed', link: env.BUILD_URL, latest: true
+)
+echo "![TCA](${uploaded.latestUrl})"
+```
+
+上传 key 必须是 CNB 服务端当前允许的类型；插件不会把未文档化的 `jenkins/*` key 当成稳定契约。
+
 PR symbols：
 
 - `cnbPullRequests`：可选 `state`（`open`、`closed`、`all`）；`cnbPullRequest`：读取上下文中的
@@ -376,7 +401,7 @@ Toolchains 让完整测试套件分别运行在 Java 17/21/25，并继续生成 
 
 发布前还必须在全新的 Docker Jenkins LTS 上安装本次 HPI，针对真实 CNB 测试仓库执行烟测：
 验证全局配置与健康页、HTTPS checkout、传统 Job 与 Multibranch 构建、Smee 到本地 Jenkins 的
-签名 Webhook、错误签名拒绝、防重放，以及 PR/Build/Release/Asset 的代表性读写与清理流程。
+签名 Webhook、错误签名拒绝、防重放，以及 Badge、PR、Build、Release/Asset 的代表性读写与清理流程。
 烟测凭据和运行证据只存放在被 `.gitignore` 排除的本地目录，不能提交、复制到日志或写入文档。
 
 当前稳定 CodeQL 尚不能解析 Kotlin 2.4.10。安全扫描会对同一份生产源码使用仅分析的 Kotlin
