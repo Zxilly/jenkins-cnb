@@ -301,6 +301,59 @@ internal data class CnbCommitStatusesWire(
 )
 
 @Serializable
+internal data class CnbBadgeGroupWire(
+    val status: String = "",
+    val type: String = "",
+    val typeEn: String = "",
+)
+
+@Serializable
+internal data class CnbBadgeSummaryWire(
+    val desc: String = "",
+    val group: CnbBadgeGroupWire? = null,
+    val link: String = "",
+    val name: String = "",
+    val type: String = "",
+    val url: String = "",
+)
+
+@Serializable
+internal data class CnbBadgeListWire(
+    val badges: List<CnbBadgeSummaryWire> = emptyList(),
+)
+
+@Serializable
+internal data class CnbGetBadgeRequestWire(
+    val branch: String,
+)
+
+@Serializable
+internal data class CnbBadgeWire(
+    val color: String = "",
+    val label: String = "",
+    val link: String = "",
+    val links: List<String> = emptyList(),
+    val message: String = "",
+)
+
+@Serializable
+internal data class CnbBadgeUploadRequestWire(
+    val key: String,
+    val latest: Boolean = false,
+    val link: String = "",
+    val message: String? = null,
+    val sha: String,
+    val value: Long? = null,
+)
+
+@Serializable
+internal data class CnbBadgeUploadResultWire(
+    @SerialName("latest_url")
+    val latestUrl: String = "",
+    val url: String = "",
+)
+
+@Serializable
 internal data class CnbPullReviewWire(
     @Serializable(with = CnbStringOrNumberSerializer::class)
     val id: String,

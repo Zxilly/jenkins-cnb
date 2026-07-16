@@ -433,6 +433,43 @@ data class CnbAuthenticatedUser(
     val email: String = "",
 ) : Serializable
 
+data class CnbBadgeGroup(
+    val status: String = "",
+    val type: String = "",
+    val englishType: String = "",
+) : Serializable
+
+data class CnbBadgeSummary(
+    val name: String,
+    val description: String,
+    val type: String,
+    val group: CnbBadgeGroup,
+    val url: String,
+    val link: String = "",
+) : Serializable
+
+data class CnbBadge(
+    val color: String,
+    val label: String,
+    val message: String,
+    val link: String = "",
+    val links: List<String> = arrayListOf(),
+) : Serializable
+
+data class CnbBadgeUploadRequest(
+    val key: String,
+    val sha: String,
+    val message: String? = null,
+    val link: String = "",
+    val latest: Boolean = false,
+    val value: Long? = null,
+) : Serializable
+
+data class CnbBadgeUploadResult(
+    val url: String,
+    val latestUrl: String = "",
+) : Serializable
+
 data class CnbCommitStatus(
     val context: String,
     val state: CnbCommitStatusState,

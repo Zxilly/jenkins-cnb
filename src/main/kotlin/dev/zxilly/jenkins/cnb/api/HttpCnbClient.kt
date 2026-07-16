@@ -2,6 +2,11 @@ package dev.zxilly.jenkins.cnb.api
 
 import dev.zxilly.jenkins.cnb.api.model.CnbApiCapabilities
 import dev.zxilly.jenkins.cnb.api.model.CnbAuthenticatedUser
+import dev.zxilly.jenkins.cnb.api.model.CnbBadge
+import dev.zxilly.jenkins.cnb.api.model.CnbBadgeGroup
+import dev.zxilly.jenkins.cnb.api.model.CnbBadgeSummary
+import dev.zxilly.jenkins.cnb.api.model.CnbBadgeUploadRequest
+import dev.zxilly.jenkins.cnb.api.model.CnbBadgeUploadResult
 import dev.zxilly.jenkins.cnb.api.model.CnbBranch
 import dev.zxilly.jenkins.cnb.api.model.CnbBuildEventName
 import dev.zxilly.jenkins.cnb.api.model.CnbBuildHistory
@@ -82,6 +87,12 @@ import dev.zxilly.jenkins.cnb.api.wire.CnbAnnotationMutationWire
 import dev.zxilly.jenkins.cnb.api.wire.CnbAnnotationWire
 import dev.zxilly.jenkins.cnb.api.wire.CnbAnnotationsRequestWire
 import dev.zxilly.jenkins.cnb.api.wire.CnbAuthenticatedUserWire
+import dev.zxilly.jenkins.cnb.api.wire.CnbBadgeGroupWire
+import dev.zxilly.jenkins.cnb.api.wire.CnbBadgeListWire
+import dev.zxilly.jenkins.cnb.api.wire.CnbBadgeSummaryWire
+import dev.zxilly.jenkins.cnb.api.wire.CnbBadgeUploadRequestWire
+import dev.zxilly.jenkins.cnb.api.wire.CnbBadgeUploadResultWire
+import dev.zxilly.jenkins.cnb.api.wire.CnbBadgeWire
 import dev.zxilly.jenkins.cnb.api.wire.CnbBranchWire
 import dev.zxilly.jenkins.cnb.api.wire.CnbBuildHistoryWire
 import dev.zxilly.jenkins.cnb.api.wire.CnbBuildInfoWire
@@ -104,6 +115,7 @@ import dev.zxilly.jenkins.cnb.api.wire.CnbCreatePullRequestWire
 import dev.zxilly.jenkins.cnb.api.wire.CnbCreateReleaseRequestWire
 import dev.zxilly.jenkins.cnb.api.wire.CnbCreatedPullRequestWire
 import dev.zxilly.jenkins.cnb.api.wire.CnbErrorWire
+import dev.zxilly.jenkins.cnb.api.wire.CnbGetBadgeRequestWire
 import dev.zxilly.jenkins.cnb.api.wire.CnbHeadWire
 import dev.zxilly.jenkins.cnb.api.wire.CnbItemsEnvelopeWire
 import dev.zxilly.jenkins.cnb.api.wire.CnbJsonCodec
@@ -271,6 +283,113 @@ internal class HttpCnbClient(
             stableIdentity = { "label:${it.id}" },
             transform = ::parseLabel,
         )
+
+    override fun listBadges(repo: String): List<CnbBadgeSummary> {
+        val path = "/${encodeRepository(repo)}/-/badge/list"
+        val bytes =
+            requestValue(
+                method = "GET",
+                path = path,
+                query = emptyMap(),
+                body = null,
+                idempotent = true,
+                acceptNotFound = false,
+            ) { response -> response.readBoundedBytes(MAX_BADGE_RESPONSE_BYTES) }
+                ?: return emptyList()
+        if (bytes.isEmpty()) return emptyList()
+        val wires =
+            CnbJsonCodec.decodeArrayOrEnvelope(
+                elementSerializer = CnbBadgeSummaryWire.serializer(),
+                envelopeDeserializer = CnbBadgeListWire.serializer(),
+                extract = CnbBadgeListWire::badges,
+                bytes = bytes,
+                context = "badge list response",
+            )
+        if (wires.size > MAX_BADGES) throw CnbApiException("CNB badge list exceeded $MAX_BADGES entries")
+        return wires.map { parseBadgeSummary(repo, it) }
+    }
+
+    override fun getBadge(
+        repo: String,
+        badge: String,
+        revision: String,
+        branch: String?,
+    ): CnbBadge? {
+        val safeBadge = normalizeBadgeName(badge)
+        val safeRevision = validateBadgeRevision(revision)
+        val safeBranch = branch?.let(::validateBadgeBranch)
+        val body =
+            safeBranch?.let {
+                encodeRequest(CnbGetBadgeRequestWire.serializer(), CnbGetBadgeRequestWire(it))
+            }
+        val wire =
+            requestBoundedJson(
+                method = "GET",
+                path =
+                    "/${encodeRepository(repo)}/-/badge/git/${encodeSegment(safeRevision)}/" +
+                        "${encodeRelativePath(safeBadge)}.json",
+                serializer = CnbBadgeWire.serializer(),
+                maxResponseBytes = MAX_BADGE_JSON_BYTES,
+                body = body,
+                idempotent = true,
+                acceptNotFound = true,
+            ) ?: return null
+        if (wire.links.size > MAX_BADGE_LINKS) throw CnbApiException("CNB badge response contained too many links")
+        return CnbBadge(
+            color = boundedRequiredWireText(wire.color, "badge color", MAX_BADGE_COLOR_LENGTH),
+            label = boundedRequiredWireText(wire.label, "badge label", MAX_BADGE_TEXT_LENGTH),
+            message = boundedRequiredWireText(wire.message, "badge message", MAX_BADGE_TEXT_LENGTH),
+            link = validateExternalUrl(wire.link, "badge link"),
+            links = wire.links.map { validateExternalUrl(it, "badge link") },
+        )
+    }
+
+    override fun uploadBadge(
+        repo: String,
+        request: CnbBadgeUploadRequest,
+    ): CnbBadgeUploadResult {
+        validateBadgeName(request.key)
+        val sha = CnbGitObjectId.canonical(request.sha)
+        require(request.message != null || request.value != null) { "CNB badge upload requires message or value" }
+        request.message?.let {
+            require(it.isNotBlank() && it.length <= MAX_BADGE_TEXT_LENGTH) { "Invalid CNB badge message" }
+            require(it.none { character -> character.code < 0x20 || character.code == 0x7f }) { "Invalid CNB badge message" }
+        }
+        val link = validateBadgeLink(request.link)
+        val body =
+            CnbBadgeUploadRequestWire(
+                key = request.key,
+                latest = request.latest,
+                link = link,
+                message = request.message,
+                sha = sha,
+                value = request.value,
+            )
+        val wire =
+            requestBoundedJson(
+                method = "POST",
+                path = "/${encodeRepository(repo)}/-/badge/upload",
+                serializer = CnbBadgeUploadResultWire.serializer(),
+                maxResponseBytes = MAX_BADGE_JSON_BYTES,
+                body = encodeRequest(CnbBadgeUploadRequestWire.serializer(), body),
+                idempotent = false,
+            ) ?: throw CnbApiException("CNB badge upload response was empty")
+        if (request.latest && wire.latestUrl.isEmpty()) {
+            throw CnbApiException("CNB badge upload response omitted its latest URL")
+        }
+        if (!request.latest && wire.latestUrl.isNotEmpty()) {
+            throw CnbApiException("CNB badge upload response unexpectedly included a latest URL")
+        }
+        return CnbBadgeUploadResult(
+            url = normalizeBadgeUrl(wire.url, repo, "badge upload URL"),
+            latestUrl =
+                wire.latestUrl
+                    .takeIf(String::isNotEmpty)
+                    ?.let {
+                        normalizeBadgeUrl(it, repo, "latest badge upload URL")
+                    }.orEmpty(),
+        )
+    }
 
     override fun listBranches(repo: String): List<CnbBranch> {
         val safeRepo = encodeRepository(repo)
@@ -1672,6 +1791,7 @@ internal class HttpCnbClient(
         query: Map<String, String> = emptyMap(),
         body: CnbEncodedJsonBody? = null,
         idempotent: Boolean = method == "GET",
+        acceptNotFound: Boolean = false,
     ): T? {
         val bytes =
             requestValue(
@@ -1680,7 +1800,7 @@ internal class HttpCnbClient(
                 query = query,
                 body = body,
                 idempotent = idempotent,
-                acceptNotFound = false,
+                acceptNotFound = acceptNotFound,
             ) { response ->
                 if (
                     response.statusCode == 204 || response.statusCode == 205 ||
@@ -2999,6 +3119,26 @@ internal class HttpCnbClient(
             updatedAt = requireWireTimestamp(wire.updatedAt, "commit status updated time"),
         )
 
+    private fun parseBadgeSummary(
+        repo: String,
+        wire: CnbBadgeSummaryWire,
+    ): CnbBadgeSummary {
+        val group = wire.group ?: CnbBadgeGroupWire()
+        return CnbBadgeSummary(
+            name = requireWireBadgeName(wire.name),
+            description = boundedWireText(wire.desc, "badge description", MAX_STATUS_DESCRIPTION_LENGTH),
+            type = boundedWireText(wire.type, "badge type", MAX_BADGE_TYPE_LENGTH),
+            group =
+                CnbBadgeGroup(
+                    status = boundedWireText(group.status, "badge group status", MAX_BADGE_GROUP_LENGTH),
+                    type = boundedWireText(group.type, "badge group type", MAX_BADGE_GROUP_LENGTH),
+                    englishType = boundedWireText(group.typeEn, "badge group English type", MAX_BADGE_GROUP_LENGTH),
+                ),
+            url = normalizeBadgeUrl(wire.url, repo, "badge URL"),
+            link = validateExternalUrl(wire.link, "badge link"),
+        )
+    }
+
     private fun parseBuildResult(wire: CnbBuildResultWire): CnbBuildResult =
         CnbBuildResult(
             sn = requireWireResourceId(wire.sn, "build serial number"),
@@ -3198,6 +3338,80 @@ internal class HttpCnbClient(
     ): String =
         safeWireToken(value, field, maxLength).takeIf(String::isNotEmpty)
             ?: throw CnbApiException("CNB response contained an empty $field")
+
+    private fun requireWireBadgeName(value: String): String =
+        try {
+            validateBadgeName(value)
+            value
+        } catch (_: IllegalArgumentException) {
+            throw CnbApiException("CNB response contained an invalid badge name")
+        }
+
+    private fun normalizeBadgeName(value: String): String {
+        val normalized = value.removeSuffix(".json")
+        validateBadgeName(normalized)
+        return normalized
+    }
+
+    private fun validateBadgeRevision(value: String): String {
+        require(value == "latest" || BADGE_REVISION.matches(value)) {
+            "CNB badge revision must be latest or an 8-character hexadecimal commit hash"
+        }
+        return value.lowercase()
+    }
+
+    private fun validateBadgeBranch(value: String): String {
+        require(value == value.trim() && value.length in 1..MAX_BUILD_REFERENCE_LENGTH) { "Invalid CNB badge branch" }
+        require(Repository.isValidRefName("refs/heads/$value")) { "Invalid CNB badge branch" }
+        return value
+    }
+
+    private fun validateBadgeLink(value: String): String {
+        if (value.isEmpty()) return ""
+        require(value.length <= MAX_EXTERNAL_URL_LENGTH && value.none { it.code < 0x20 || it.code == 0x7f }) {
+            "Invalid CNB badge link"
+        }
+        val uri = runCatching { URI(value) }.getOrNull()
+        require(
+            uri != null && uri.isAbsolute && !uri.host.isNullOrBlank() && uri.rawUserInfo == null && uri.rawFragment == null &&
+                (uri.scheme.equals("https", true) || uri.scheme.equals("http", true)),
+        ) { "Invalid CNB badge link" }
+        return uri.toASCIIString()
+    }
+
+    private fun normalizeBadgeUrl(
+        value: String,
+        repo: String,
+        field: String,
+    ): String {
+        if (value.isEmpty() || value.length > MAX_EXTERNAL_URL_LENGTH || value.any { it.code < 0x20 || it.code == 0x7f }) {
+            throw CnbApiException("CNB response contained an invalid $field")
+        }
+        val candidate =
+            try {
+                URI(value)
+            } catch (_: IllegalArgumentException) {
+                throw CnbApiException("CNB response contained an invalid $field")
+            }
+        if (candidate.rawUserInfo != null || candidate.rawQuery != null || candidate.rawFragment != null) {
+            throw CnbApiException("CNB response contained an invalid $field")
+        }
+        val webRoot = server.normalizedWebUri()
+        val resolved =
+            if (candidate.isAbsolute) {
+                candidate
+            } else {
+                if (!value.startsWith('/') || candidate.rawAuthority != null) {
+                    throw CnbApiException("CNB response contained an invalid $field")
+                }
+                URI(webRoot.scheme, null, webRoot.host, webRoot.port, "/", null, null).resolve(candidate)
+            }
+        val expectedPrefix = "/${encodeRepository(repo)}/-/badge/"
+        if (!sameOrigin(webRoot, resolved) || !resolved.rawPath.startsWith(expectedPrefix)) {
+            throw CnbApiException("CNB response contained an invalid $field")
+        }
+        return resolved.toASCIIString()
+    }
 
     private fun validateExternalUrl(
         value: String,
@@ -3412,6 +3626,14 @@ internal class HttpCnbClient(
     private fun validateComment(body: String) {
         require(body.isNotBlank()) { "Comment body must not be empty" }
         require(body.length <= MAX_COMMENT_LENGTH) { "Comment body is too long" }
+    }
+
+    private fun validateBadgeName(value: String) {
+        require(value.length in 1..MAX_BADGE_NAME_LENGTH) { "Invalid CNB badge name length" }
+        require(value.none { it == '\\' || it.isWhitespace() || it.code < 0x20 || it.code == 0x7f }) {
+            "Invalid CNB badge name"
+        }
+        encodeRelativePath(value)
     }
 
     private fun validatePullNumbers(numbers: List<String>) {
@@ -3697,6 +3919,15 @@ internal class HttpCnbClient(
         private const val MAX_DIFF_PATCH_LENGTH = 4 * 1024 * 1024
         private const val MAX_STATUS_CONTEXT_LENGTH = 1_024
         private const val MAX_STATUS_DESCRIPTION_LENGTH = 4_096
+        private const val MAX_BADGES = 1_000
+        private const val MAX_BADGE_RESPONSE_BYTES = 4 * 1024 * 1024
+        private const val MAX_BADGE_NAME_LENGTH = 1_024
+        private const val MAX_BADGE_TYPE_LENGTH = 256
+        private const val MAX_BADGE_GROUP_LENGTH = 1_024
+        private const val MAX_BADGE_JSON_BYTES = 64 * 1024
+        private const val MAX_BADGE_LINKS = 20
+        private const val MAX_BADGE_COLOR_LENGTH = 128
+        private const val MAX_BADGE_TEXT_LENGTH = 4_096
         private const val MAX_PULL_TITLE_LENGTH = 1_000
         private const val MAX_PULL_BODY_LENGTH = 1024 * 1024
         private const val MAX_PULL_REF_LENGTH = 1_024
@@ -3783,6 +4014,7 @@ internal class HttpCnbClient(
         private const val CIRCUIT_FAILURE_THRESHOLD = 5
         private const val CIRCUIT_OPEN_MILLIS = 30_000L
         private const val MAX_FAILURE_GRAPH_NODES = 32
+        private val BADGE_REVISION = Regex("(?i)[0-9a-f]{8}")
         private val PERMITS = ConcurrentHashMap<String, Semaphore>()
         private val CIRCUITS = ConcurrentHashMap<String, CircuitBreaker>()
 

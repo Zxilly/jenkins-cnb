@@ -2,6 +2,10 @@ package dev.zxilly.jenkins.cnb.api
 
 import dev.zxilly.jenkins.cnb.api.model.CnbApiCapabilities
 import dev.zxilly.jenkins.cnb.api.model.CnbAuthenticatedUser
+import dev.zxilly.jenkins.cnb.api.model.CnbBadge
+import dev.zxilly.jenkins.cnb.api.model.CnbBadgeSummary
+import dev.zxilly.jenkins.cnb.api.model.CnbBadgeUploadRequest
+import dev.zxilly.jenkins.cnb.api.model.CnbBadgeUploadResult
 import dev.zxilly.jenkins.cnb.api.model.CnbBranch
 import dev.zxilly.jenkins.cnb.api.model.CnbBuildHistory
 import dev.zxilly.jenkins.cnb.api.model.CnbBuildHistoryQuery
@@ -84,6 +88,20 @@ interface CnbClient : Closeable {
     fun listUserRepositories(): List<CnbRepository>
 
     fun listRepositoryLabels(repo: String): List<CnbLabel>
+
+    fun listBadges(repo: String): List<CnbBadgeSummary>
+
+    fun getBadge(
+        repo: String,
+        badge: String,
+        revision: String = "latest",
+        branch: String? = null,
+    ): CnbBadge?
+
+    fun uploadBadge(
+        repo: String,
+        request: CnbBadgeUploadRequest,
+    ): CnbBadgeUploadResult
 
     fun listBranches(repo: String): List<CnbBranch>
 

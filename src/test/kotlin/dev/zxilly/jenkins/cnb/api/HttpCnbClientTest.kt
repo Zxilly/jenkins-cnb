@@ -2,6 +2,7 @@ package dev.zxilly.jenkins.cnb.api
 
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
+import dev.zxilly.jenkins.cnb.api.model.CnbBadgeUploadRequest
 import dev.zxilly.jenkins.cnb.api.model.CnbBuildEventName
 import dev.zxilly.jenkins.cnb.api.model.CnbBuildNpcName
 import dev.zxilly.jenkins.cnb.api.model.CnbBuildStageStatus
@@ -143,6 +144,168 @@ class HttpCnbClientTest {
         assertEquals("GET", requests.single().method)
         assertEquals("/user", requests.single().rawPath)
         assertEquals(listOf(CNB_MEDIA_TYPE), requests.single().accept)
+    }
+
+    @Test
+    fun `lists badges from the current array response with trusted absolute URLs`() {
+        handlers["/team/project/-/badge/list"] = { exchange ->
+            respond(
+                exchange,
+                200,
+                """
+                [{
+                  "group":{"type":"Cloud native build","typeEn":"cloud native build"},
+                  "type":"git",
+                  "desc":"push",
+                  "name":"ci/status/push",
+                  "url":"/team/project/-/badge/git/latest/ci/status/push",
+                  "relativeUrl":"/-/badge/git/latest/ci/status/push"
+                }]
+                """.trimIndent(),
+            )
+        }
+
+        val badge = client.listBadges("team/project").single()
+
+        assertEquals("ci/status/push", badge.name)
+        assertEquals("push", badge.description)
+        assertEquals("git", badge.type)
+        assertEquals("Cloud native build", badge.group.type)
+        assertEquals("cloud native build", badge.group.englishType)
+        assertEquals(
+            "http://127.0.0.1:${server.address.port}/team/project/-/badge/git/latest/ci/status/push",
+            badge.url,
+        )
+        assertEquals("GET", requests.single().method)
+        assertEquals("/team/project/-/badge/list", requests.single().rawPath)
+    }
+
+    @Test
+    fun `lists badges from the documented envelope with optional display text omitted`() {
+        handlers["/team/project/-/badge/list"] = { exchange ->
+            respond(
+                exchange,
+                200,
+                """
+                {"badges":[{
+                  "name":"security/tca",
+                  "url":"http://127.0.0.1:${server.address.port}/team/project/-/badge/git/latest/security/tca"
+                }]}
+                """.trimIndent(),
+            )
+        }
+
+        val badge = client.listBadges("team/project").single()
+
+        assertEquals("", badge.description)
+        assertEquals("", badge.type)
+        assertEquals("", badge.group.status)
+        assertEquals("", badge.group.type)
+        assertEquals("", badge.group.englishType)
+        assertEquals("", badge.link)
+    }
+
+    @Test
+    fun `reads nested badge JSON for the requested branch`() {
+        handlers["/team/project/-/badge/git/latest/ci/status/push.json"] = { exchange ->
+            respond(
+                exchange,
+                200,
+                """{"color":"#2cbe4e","label":"build","message":"passing","link":"https://jenkins.example/job/1","links":["https://jenkins.example/job/1","https://cnb.cool/team/project"]}""",
+            )
+        }
+
+        val badge = requireNotNull(client.getBadge("team/project", "ci/status/push", "latest", "master"))
+
+        assertEquals("#2cbe4e", badge.color)
+        assertEquals("build", badge.label)
+        assertEquals("passing", badge.message)
+        assertEquals("https://jenkins.example/job/1", badge.link)
+        assertEquals(listOf("https://jenkins.example/job/1", "https://cnb.cool/team/project"), badge.links)
+        assertEquals("GET", requests.single().method)
+        assertEquals("/team/project/-/badge/git/latest/ci/status/push.json", requests.single().rawPath)
+        assertEquals("{\"branch\":\"master\"}", requests.single().body)
+    }
+
+    @Test
+    fun `returns null when a badge does not exist for the revision`() {
+        handlers["/team/project/-/badge/git/deadbeef/security/tca.json"] = { exchange ->
+            respond(exchange, 404, """{"errcode":404,"errmsg":"badge not found"}""")
+        }
+
+        assertNull(client.getBadge("team/project", "security/tca", "deadbeef"))
+        assertEquals(1, requests.size)
+    }
+
+    @Test
+    fun `rejects invalid badge routes before sending a request`() {
+        listOf("main", "1234567", "123456789", "zzzzzzzz").forEach { revision ->
+            assertThrows(IllegalArgumentException::class.java) {
+                client.getBadge("team/project", "security/tca", revision)
+            }
+        }
+        listOf("", "/security/tca", "security//tca", "security/../tca", "security\\tca").forEach { badge ->
+            assertThrows(IllegalArgumentException::class.java) {
+                client.getBadge("team/project", badge)
+            }
+        }
+
+        assertEquals(0, requests.size)
+    }
+
+    @Test
+    fun `uploads a badge without losing an explicit zero value`() {
+        handlers["/team/project/-/badge/upload"] = { exchange ->
+            respond(
+                exchange,
+                200,
+                """{"url":"/team/project/-/badge/git/$shaA/security/tca","latest_url":"/team/project/-/badge/git/latest/security/tca"}""",
+            )
+        }
+
+        val result =
+            client.uploadBadge(
+                "team/project",
+                CnbBadgeUploadRequest(
+                    key = "security/tca",
+                    sha = shaA,
+                    message = "passed",
+                    link = "https://jenkins.example/job/1",
+                    latest = true,
+                    value = 0,
+                ),
+            )
+
+        assertEquals(
+            "http://127.0.0.1:${server.address.port}/team/project/-/badge/git/$shaA/security/tca",
+            result.url,
+        )
+        assertEquals(
+            "http://127.0.0.1:${server.address.port}/team/project/-/badge/git/latest/security/tca",
+            result.latestUrl,
+        )
+        assertEquals("POST", requests.single().method)
+        assertEquals("/team/project/-/badge/upload", requests.single().rawPath)
+        assertEquals(
+            "{\"key\":\"security/tca\",\"latest\":true,\"link\":\"https://jenkins.example/job/1\",\"message\":\"passed\",\"sha\":\"$shaA\",\"value\":0}",
+            requests.single().body,
+        )
+    }
+
+    @Test
+    fun `does not retry a failed badge upload`() {
+        handlers["/team/project/-/badge/upload"] = { exchange ->
+            respond(exchange, 503, """{"errcode":503,"errmsg":"temporarily unavailable"}""")
+        }
+
+        assertThrows(CnbApiException::class.java) {
+            client.uploadBadge(
+                "team/project",
+                CnbBadgeUploadRequest(key = "security/tca", sha = shaA, message = "passed"),
+            )
+        }
+
+        assertEquals(1, requests.size)
     }
 
     @Test
