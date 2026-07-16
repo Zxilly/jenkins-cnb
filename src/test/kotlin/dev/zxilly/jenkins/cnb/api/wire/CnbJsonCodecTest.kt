@@ -58,40 +58,18 @@ class CnbJsonCodecTest {
     }
 
     @Test
-    fun `rejects duplicate object keys before typed decoding`() {
-        assertThrows(CnbApiException::class.java) {
-            decodeUser("""{"username":"alice","username":"mallory"}""")
-        }
-    }
-
-    @Test
-    fun `malformed and duplicate input never escapes through exception graphs`() {
+    fun `malformed input never escapes through exception graphs`() {
         val secret = "Bearer secret-shaped-parser-input-1234567890"
-        val inputs =
-            listOf(
-                """{"username":"$secret","username":"mallory"}""",
-                """{"username":"$secret","future":}""",
-            )
+        val input = """{"username":"$secret","future":}"""
 
-        inputs.forEach { input ->
-            val failure = assertThrows(CnbApiException::class.java) { decodeUser(input) }
-            val graph = throwableGraph(failure)
+        val failure = assertThrows(CnbApiException::class.java) { decodeUser(input) }
+        val graph = throwableGraph(failure)
 
-            assertEquals("CNB test user response contained invalid JSON", failure.message)
-            assertNull(failure.cause)
-            assertTrue(graph.none { secret in it.toString() })
-            assertTrue(graph.none { "JSON input:" in it.toString() })
-            assertFalse(graph.any { it.suppressed.isNotEmpty() })
-        }
-    }
-
-    @Test
-    fun `rejects documents beyond the lexical nesting bound`() {
-        val nestedValue = "[".repeat(65) + "0" + "]".repeat(65)
-
-        assertThrows(CnbApiException::class.java) {
-            decodeUser("""{"username":"alice","future":$nestedValue}""")
-        }
+        assertEquals("CNB test user response contained invalid JSON", failure.message)
+        assertNull(failure.cause)
+        assertTrue(graph.none { secret in it.toString() })
+        assertTrue(graph.none { "JSON input:" in it.toString() })
+        assertFalse(graph.any { it.suppressed.isNotEmpty() })
     }
 
     @Test

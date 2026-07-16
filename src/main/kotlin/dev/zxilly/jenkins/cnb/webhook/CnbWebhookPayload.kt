@@ -1,8 +1,5 @@
 package dev.zxilly.jenkins.cnb.webhook
 
-import com.fasterxml.jackson.core.JsonFactory
-import com.fasterxml.jackson.core.StreamReadConstraints
-import com.fasterxml.jackson.core.StreamReadFeature
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.SerializationException
@@ -132,21 +129,6 @@ internal class CnbWebhookFormatException(
 ) : IllegalArgumentException(message)
 
 internal object CnbWebhookPayloadParser {
-    private val lexicalGuard =
-        JsonFactory
-            .builder()
-            .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
-            .streamReadConstraints(
-                StreamReadConstraints
-                    .builder()
-                    .maxDocumentLength(MAX_DOCUMENT_BYTES.toLong())
-                    .maxNestingDepth(MAX_NESTING_DEPTH)
-                    .maxStringLength(MAX_STRING_LENGTH)
-                    .maxNameLength(MAX_FIELD_NAME_LENGTH)
-                    .maxNumberLength(MAX_NUMBER_LENGTH)
-                    .build(),
-            ).build()
-
     private val json =
         Json {
             ignoreUnknownKeys = true
@@ -155,10 +137,8 @@ internal object CnbWebhookPayloadParser {
             allowSpecialFloatingPointValues = false
         }
 
-    fun parse(rawBody: ByteArray): CnbWebhookPayload {
-        if (rawBody.size > MAX_DOCUMENT_BYTES) throw CnbWebhookFormatException("Malformed JSON payload")
-        return try {
-            validateLexically(rawBody)
+    fun parse(rawBody: ByteArray): CnbWebhookPayload =
+        try {
             val wire =
                 json.decodeFromString(
                     CnbWebhookPayloadWire.serializer(),
@@ -174,39 +154,18 @@ internal object CnbWebhookPayloadParser {
         } catch (_: Exception) {
             throw CnbWebhookFormatException("Malformed JSON payload")
         }
-    }
-
-    private fun validateLexically(rawBody: ByteArray) {
-        lexicalGuard.createParser(rawBody).use { parser ->
-            while (parser.nextToken() != null) {
-                // Exhausting the token stream applies duplicate detection and every stream limit
-                // before the strongly typed decoder allocates its object graph.
-            }
-        }
-    }
 
     fun parseOccurredAt(value: String): Instant =
         runCatching { Instant.parse(value) }
             .recoverCatching { OffsetDateTime.parse(value).toInstant() }
             .getOrElse { throw CnbWebhookFormatException("occurred_at must be an ISO-8601 timestamp") }
 
-    private fun decodeFragment(value: String): String {
-        if (value.length > MAX_STRING_LENGTH) throw CnbWebhookFormatException("Encoded webhook string is too large")
-        val decoded =
-            try {
-                json.decodeFromString(String.serializer(), "\"$value\"")
-            } catch (_: Exception) {
-                throw CnbWebhookFormatException("Malformed encoded webhook string")
-            }
-        if (decoded.length > MAX_STRING_LENGTH) throw CnbWebhookFormatException("Decoded webhook string is too large")
-        return decoded
-    }
-
-    private const val MAX_DOCUMENT_BYTES = 256 * 1024
-    private const val MAX_NESTING_DEPTH = 16
-    private const val MAX_STRING_LENGTH = 128 * 1024
-    private const val MAX_FIELD_NAME_LENGTH = 128
-    private const val MAX_NUMBER_LENGTH = 64
+    private fun decodeFragment(value: String): String =
+        try {
+            json.decodeFromString(String.serializer(), "\"$value\"")
+        } catch (_: Exception) {
+            throw CnbWebhookFormatException("Malformed encoded webhook string")
+        }
 }
 
 @KotlinSerializable

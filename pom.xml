@@ -79,7 +79,7 @@
     <ban-junit4-imports.skip>false</ban-junit4-imports.skip>
     <banObsoleteDependencyOverrides.skip>false</banObsoleteDependencyOverrides.skip>
     <hpi.strictBundledArtifacts>true</hpi.strictBundledArtifacts>
-    <hpi.bundledArtifacts>annotations,httpclient5,httpcore5,httpcore5-h2,kotlin-stdlib,kotlinx-serialization-core-jvm,kotlinx-serialization-json-jvm,re2j</hpi.bundledArtifacts>
+    <hpi.bundledArtifacts>annotations,httpclient5,httpcore5,httpcore5-h2,kotlin-stdlib,kotlinx-serialization-core-jvm,kotlinx-serialization-json,kotlinx-serialization-json-jvm,re2j</hpi.bundledArtifacts>
   </properties>
 
   <dependencyManagement>
@@ -102,7 +102,7 @@
     </dependency>
     <dependency>
       <groupId>org.jetbrains.kotlinx</groupId>
-      <artifactId>kotlinx-serialization-json-jvm</artifactId>
+      <artifactId>kotlinx-serialization-json</artifactId>
       <version>${kotlinx.serialization.version}</version>
     </dependency>
     <dependency>
@@ -157,10 +157,6 @@
     <dependency>
       <groupId>org.jenkins-ci.plugins</groupId>
       <artifactId>structs</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.jenkins-ci.plugins</groupId>
-      <artifactId>jackson2-api</artifactId>
     </dependency>
     <dependency>
       <groupId>org.jenkins-ci.plugins.workflow</groupId>

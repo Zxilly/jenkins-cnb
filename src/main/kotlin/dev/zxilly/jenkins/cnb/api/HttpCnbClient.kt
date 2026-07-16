@@ -1901,7 +1901,7 @@ internal class HttpCnbClient(
             if (response.statusCode() in 200..299) {
                 StreamingBodySubscriber(maxBytes, response.headers().firstValue("Content-Length").orElse(null), target)
             } else {
-                HttpResponse.BodySubscribers.mapping(BoundedByteArraySubscriber(MAX_RESPONSE_BYTES)) { bytes ->
+                HttpResponse.BodySubscribers.mapping(BoundedByteArraySubscriber(MAX_TRANSFER_ERROR_BYTES)) { bytes ->
                     TransferBody.Buffered(bytes)
                 }
             }
@@ -2264,7 +2264,7 @@ internal class HttpCnbClient(
         uri: URI,
         body: CnbEncodedJsonBody?,
         includeAuthorization: Boolean = true,
-        maxResponseBytes: Int = MAX_RESPONSE_BYTES,
+        maxResponseBytes: Int? = null,
     ): HttpResponse<ByteArray> {
         require(uri.isAbsolute && !uri.host.isNullOrBlank()) { "CNB request URI must have a host" }
         if (!server.allowPrivateNetwork) CnbEndpointPolicy.validatePublicAddress(uri.host)
@@ -2287,7 +2287,12 @@ internal class HttpCnbClient(
             token?.let { requestBuilder.header("Authorization", "Bearer ${it.plainText}") }
         }
 
-        return sendRequest(requestBuilder.build()) { BoundedByteArraySubscriber(maxResponseBytes) }
+        val request = requestBuilder.build()
+        return if (maxResponseBytes == null) {
+            sendRequest(request, HttpResponse.BodyHandlers.ofByteArray())
+        } else {
+            sendRequest(request) { BoundedByteArraySubscriber(maxResponseBytes) }
+        }
     }
 
     private fun <T> sendRequest(
@@ -3520,8 +3525,8 @@ internal class HttpCnbClient(
         private const val MAX_CONCURRENT_REQUESTS = 8
         private const val PERMIT_WAIT_SECONDS = 5L
         private const val MAX_ATTEMPTS = 4
-        private const val MAX_RESPONSE_BYTES = 4 * 1024 * 1024
-        private const val MAX_RAW_RESPONSE_BYTES = MAX_RESPONSE_BYTES
+        private const val MAX_RAW_RESPONSE_BYTES = 4 * 1024 * 1024
+        private const val MAX_TRANSFER_ERROR_BYTES = 4 * 1024 * 1024
         private const val MAX_RAW_REFERENCE_LENGTH = 1_024
         private const val MAX_CONTENT_TYPE_LENGTH = 256
         private const val MAX_COMMENT_LENGTH = 60_000

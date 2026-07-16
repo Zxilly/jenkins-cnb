@@ -43,16 +43,15 @@ Organization Folder，并以 CNB 当前公开 OpenAPI 的能力为边界。
 
 ## 强类型与不可信边界
 
-插件不会把 CNB 响应直接作为 `Map<String, Any?>`、Jackson Databind 对象或任意 JSON 暴露给
+插件不会把 CNB 响应直接作为 `Map<String, Any?>`、反射式对象或任意 JSON 暴露给
 Jenkins。OpenAPI wire DTO 与 Webhook payload 均使用 `@Serializable` 类型；只在 CNB 同一标量
 可能返回字符串、数字或布尔值时使用受限的自定义标量 serializer。Wire DTO 转换为领域模型时还会
 再次校验仓库路径、ref、完整的 40/64 位 Git object ID、枚举、时间戳、URL、集合数量和文本长度。
 
-JSON 解析拒绝重复 key、宽松语法、特殊浮点数以及超过文档大小、嵌套深度、字符串、数字和 token
-上限的输入；未知字段只为 CNB 向前兼容而忽略。所有 API URL 都从管理员配置的 CNB origin 和经过
-编码的强类型路径参数生成。Release/Build 下载中的重定向或预签名 URL 视为不可信输入，逐跳执行
-HTTPS/公网策略且不转发 CNB `Authorization`。Pipeline 最终只获得经过校验、可由 CPS 安全持久化
-的值。
+JSON 解析拒绝宽松语法、特殊浮点数和不兼容字段类型；未知字段只为 CNB 向前兼容而忽略。所有 API
+URL 都从管理员配置的 CNB origin 和经过编码的强类型路径参数生成。Release/Build 下载中的重定向
+或预签名 URL 视为不可信输入，逐跳执行 HTTPS/公网策略且不转发 CNB `Authorization`。Pipeline
+最终只获得经过校验、可由 CPS 安全持久化的值。
 
 ## CNB API 能力边界
 

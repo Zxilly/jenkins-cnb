@@ -23,19 +23,6 @@ class CnbWebhookPayloadTest {
     }
 
     @Test
-    fun `rejects duplicate JSON fields`() {
-        val duplicate =
-            TRUSTED_PULL_REQUEST.replaceFirst(
-                "\"delivery_id\": \"pipeline-1\"",
-                "\"delivery_id\": \"one\", \"delivery_id\": \"two\"",
-            )
-
-        assertThrows(CnbWebhookFormatException::class.java) {
-            CnbWebhookPayloadParser.parse(duplicate.toByteArray())
-        }
-    }
-
-    @Test
     fun `wraps malformed JSON as a webhook format failure`() {
         val malformed = TRUSTED_PULL_REQUEST.dropLast(1)
 
@@ -63,16 +50,6 @@ class CnbWebhookPayloadTest {
 
         assertEquals("team/project", payload.repository.slug)
         assertEquals("feature/safe", payload.pullRequest?.sourceBranch)
-    }
-
-    @Test
-    fun `rejects an unknown field that exceeds the lexical depth limit`() {
-        val nested = (1..20).fold("{}") { value, _ -> "{\"next\":$value}" }
-        val tooDeep = TRUSTED_PULL_REQUEST.replaceFirst("{", "{\"future\":$nested,")
-
-        assertThrows(CnbWebhookFormatException::class.java) {
-            CnbWebhookPayloadParser.parse(tooDeep.toByteArray())
-        }
     }
 
     @Test

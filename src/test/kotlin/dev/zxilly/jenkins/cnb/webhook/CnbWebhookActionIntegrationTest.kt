@@ -19,7 +19,6 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.jvnet.hudson.test.JenkinsRule
 import org.jvnet.hudson.test.junit.jupiter.WithJenkins
-import java.io.ByteArrayInputStream
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -70,28 +69,12 @@ class CnbWebhookActionIntegrationTest {
 
         assertResponse(send(client, endpoint, body, signature, contentType = "text/plain"), 415, "rejected", false)
         assertResponse(send(client, endpoint, ByteArray(0), signature), 400, "rejected", false)
-        assertResponse(
-            send(client, endpoint, ByteArray(CnbWebhookAction.MAX_BODY_BYTES + 1) { 'x'.code.toByte() }, signature),
-            413,
-            "rejected",
-            false,
-        )
-        val chunkedTooLarge =
-            HttpRequest
-                .newBuilder(endpoint)
-                .header("Content-Type", "application/json")
-                .header(CnbWebhookAction.SIGNATURE_HEADER, signature)
-                .POST(
-                    HttpRequest.BodyPublishers.ofInputStream {
-                        ByteArrayInputStream(ByteArray(CnbWebhookAction.MAX_BODY_BYTES + 1) { 'x'.code.toByte() })
-                    },
-                ).build()
-        assertResponse(
-            client.send(chunkedTooLarge, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)),
-            413,
-            "rejected",
-            false,
-        )
+        val largeBody =
+            payload("team/project", "large-delivery-${System.nanoTime()}")
+                .toString(StandardCharsets.UTF_8)
+                .replaceFirst("{", "{\"future_padding\":\"${"x".repeat(256 * 1024)}\",")
+                .toByteArray(StandardCharsets.UTF_8)
+        assertResponse(send(client, endpoint, largeBody, sign(largeBody, SECRET)), 202, "accepted", false)
 
         val malformed = "{".toByteArray(StandardCharsets.UTF_8)
         assertResponse(send(client, endpoint, malformed, sign(malformed, SECRET)), 400, "rejected", false)

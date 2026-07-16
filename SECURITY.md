@@ -12,9 +12,9 @@ been included in logs or payloads before sharing diagnostic material.
 
 ## Deployment hardening
 
-- Terminate TLS at Jenkins or a trusted reverse proxy and apply normal request-rate limits to
-  `/cnb-webhook/`; the plugin additionally enforces a 256 KiB body limit, HMAC authentication,
-  freshness, and persistent replay protection.
+- Terminate TLS at Jenkins or a trusted reverse proxy and apply normal request-rate and body-size
+  limits to `/cnb-webhook/`; the plugin enforces HMAC authentication, freshness, and persistent
+  replay protection.
 - Use a different webhook key for every repository. Never reuse an OpenAPI or Git token as an HMAC
   key.
 - Leave private-network and insecure-HTTP endpoint options disabled for `cnb.cool`. With private

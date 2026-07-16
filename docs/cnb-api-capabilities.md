@@ -23,11 +23,10 @@ Wire DTO，再映射成领域模型。API、SCM、触发器和结果上报层不
 
 - 仓库路径、namespace、Git ref、40/64 位完整对象 ID、PR/Release/Asset/Build ID；
 - PR、Review、Commit Status、Build、Pipeline、Stage、可见性和仓库生命周期枚举；
-- ISO-8601 时间、非负计数与持续时间、媒体类型、外部 URL、文件名和 workspace 相对路径；
-- JSON 重复 key、UTF-8、嵌套深度、字段/字符串/数字长度、token 数和文档大小。
+- ISO-8601 时间、非负计数与持续时间、媒体类型、外部 URL、文件名和 workspace 相对路径。
 
 未知 JSON 字段会被忽略以兼容 CNB 增量扩展；未知枚举、非法标量和不满足语义约束的必需字段会
-fail closed。Jackson Core 只作为 typed decode 前的流式词法守卫，不用于对象映射。
+fail closed。
 
 ## SCM、仓库和发现
 

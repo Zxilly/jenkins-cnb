@@ -22,7 +22,6 @@ import kotlinx.serialization.json.Json
 import org.jenkinsci.plugins.plaincredentials.StringCredentials
 import org.kohsuke.stapler.StaplerRequest2
 import org.kohsuke.stapler.StaplerResponse2
-import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.nio.charset.StandardCharsets
 import java.util.Collections
@@ -93,11 +92,6 @@ class CnbWebhookAction
                 writeJson(response, HttpServletResponse.SC_UNSUPPORTED_MEDIA_TYPE, CnbWebhookResponseStatus.REJECTED, duplicate = false)
                 return
             }
-            if (request.contentLengthLong > MAX_BODY_BYTES) {
-                writeJson(response, HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE, CnbWebhookResponseStatus.REJECTED, duplicate = false)
-                return
-            }
-
             val signatures = Collections.list(request.getHeaders(SIGNATURE_HEADER))
             val signature = signatures.singleOrNull()
             if (!CnbHmac.isValidSignatureHeader(signature)) {
@@ -114,27 +108,7 @@ class CnbWebhookAction
             try {
                 val rawBody =
                     try {
-                        request.inputStream.use { input ->
-                            val output = ByteArrayOutputStream(8192)
-                            val buffer = ByteArray(8192)
-                            var total = 0
-                            while (true) {
-                                val read = input.read(buffer)
-                                if (read < 0) break
-                                total += read
-                                if (total > MAX_BODY_BYTES) throw RequestTooLargeException()
-                                output.write(buffer, 0, read)
-                            }
-                            output.toByteArray()
-                        }
-                    } catch (_: RequestTooLargeException) {
-                        writeJson(
-                            response,
-                            HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE,
-                            CnbWebhookResponseStatus.REJECTED,
-                            duplicate = false,
-                        )
-                        return
+                        request.inputStream.use { it.readAllBytes() }
                     } catch (e: IOException) {
                         LOGGER.log(Level.FINE, "Failed to read a CNB webhook request body", e)
                         writeJson(response, HttpServletResponse.SC_BAD_REQUEST, CnbWebhookResponseStatus.REJECTED, duplicate = false)
@@ -225,12 +199,9 @@ class CnbWebhookAction
             )
         }
 
-        private class RequestTooLargeException : IOException()
-
         companion object {
             const val URL_NAME = "cnb-webhook"
             const val SIGNATURE_HEADER = "X-CNB-Signature"
-            const val MAX_BODY_BYTES = 256 * 1024
             private const val JSON_MEDIA_TYPE = "application/json"
             private val RESPONSE_JSON = Json { encodeDefaults = true }
             private val HEALTH_CLASS_BOUNDARY = Regex("(?<=[a-z0-9])(?=[A-Z])")

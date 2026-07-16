@@ -899,16 +899,22 @@ class HttpCnbClientTest {
     }
 
     @Test
-    fun `rejects an oversized single API response`() {
+    fun `accepts a single API response beyond the former transport limit`() {
         val padding = "x".repeat(4 * 1024 * 1024)
         handlers["/user/repos"] = { exchange ->
-            respond(exchange, 200, """[{"id":"1","path":"org/one","padding":"$padding"}]""")
+            val body =
+                if (query(exchange.requestURI.rawQuery)["page"] == "1") {
+                    """[{"id":"1","path":"org/one","padding":"$padding"}]"""
+                } else {
+                    "[]"
+                }
+            respond(exchange, 200, body)
         }
 
-        val error = assertThrows(CnbApiException::class.java) { client.listUserRepositories() }
+        val repositories = client.listUserRepositories()
 
-        assertTrue(error.message.orEmpty().contains("response exceeded"))
-        assertEquals(1, requests.size)
+        assertEquals(listOf("org/one"), repositories.map { it.path })
+        assertEquals(2, requests.size)
     }
 
     @Test
