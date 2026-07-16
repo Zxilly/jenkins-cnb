@@ -321,9 +321,10 @@ JaCoCo 0.8.15，生成 Java 17 bytecode，并在 Java 17/21/25 与 Windows/Linux
 `target/site/jacoco`，并强制聚合行覆盖率不低于 86%（高于项目要求的 85%）。GitHub Actions
 还在 Ubuntu Java 17/21/25、Windows Java 17 上分别构建，并运行 Jenkins Security Scan。
 
-测试类默认在相互隔离的 JVM 中以 `0.45C` 并行执行；本地内存受限或需要复现顺序相关问题时，可
-使用 `./mvnw -DforkCount=1 test` 回退为串行。Jenkins Test Harness 依赖全局状态，因此不启用
-JUnit 方法级线程并行。最新 Jenkins 注解处理器要求 Maven/KAPT 运行在 Java 21+；CI 通过 Maven
+测试类默认在相互隔离的 JVM 中以 `0.45C` 并行执行，CI 则覆盖为更激进的 `1C`，即每个可用核心
+运行一个测试 fork；本地内存受限或需要复现顺序相关问题时，可使用
+`./mvnw -DforkCount=1 test` 回退为串行。Jenkins Test Harness 依赖全局状态，因此不启用 JUnit
+方法级线程并行。最新 Jenkins 注解处理器要求 Maven/KAPT 运行在 Java 21+；CI 通过 Maven
 Toolchains 让完整测试套件分别运行在 Java 17/21/25，并继续生成 Java 17 bytecode。
 
 发布前还必须在全新的 Docker Jenkins LTS 上安装本次 HPI，针对真实 CNB 测试仓库执行烟测：

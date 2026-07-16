@@ -51,6 +51,7 @@ jobs:
           -Dchangelist=
           -DscmTag="$VERSION"
           -Dtest.jdk.version=17
+          -DforkCount=1C
           clean verify
       - name: Verify HPI identity and bundled libraries
         env:
