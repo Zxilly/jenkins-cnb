@@ -52,10 +52,14 @@ import java.time.Instant
 import java.time.ZonedDateTime
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 class HttpCnbClientTest {
     private lateinit var server: HttpServer
+    private lateinit var serverExecutor: ExecutorService
     private lateinit var client: HttpCnbClient
     private val requests = CopyOnWriteArrayList<Request>()
     private val handlers = ConcurrentHashMap<String, (HttpExchange) -> Unit>()
@@ -70,6 +74,8 @@ class HttpCnbClientTest {
     @BeforeEach
     fun setUp() {
         server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        serverExecutor = Executors.newFixedThreadPool(2)
+        server.executor = serverExecutor
         server.createContext("/") { exchange ->
             requests +=
                 Request(
@@ -108,8 +114,13 @@ class HttpCnbClientTest {
 
     @AfterEach
     fun tearDown() {
-        client.close()
-        server.stop(0)
+        try {
+            client.close()
+        } finally {
+            server.stop(0)
+            serverExecutor.shutdownNow()
+            assertTrue(serverExecutor.awaitTermination(5, TimeUnit.SECONDS), "test HTTP executor did not stop")
+        }
     }
 
     @Test
