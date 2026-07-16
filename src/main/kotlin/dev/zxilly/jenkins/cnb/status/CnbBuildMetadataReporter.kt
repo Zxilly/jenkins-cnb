@@ -216,11 +216,11 @@ internal object CnbBuildMetadataReporter {
         val normalized =
             context
                 .lowercase(Locale.ROOT)
-                .replace(Regex("[^a-z0-9._-]+"), "-")
-                .trim('-', '.', '_')
+                .replace(Regex("[^a-z0-9_-]+"), "-")
+                .trim('-', '_')
                 .take(CONTEXT_SLUG_LENGTH)
                 .ifBlank { "default" }
-        return "jenkins/$normalized-${sha256(context).take(12)}/"
+        return "jenkins_$normalized-${sha256(context).take(12)}_"
     }
 
     private fun lockFor(

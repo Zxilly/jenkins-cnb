@@ -68,7 +68,7 @@ CNB 当前公开 OpenAPI 没有 Webhook CRUD、原生 Commit Status/Check 写接
 使用的 Deployment API。本插件不会伪造这些能力：
 
 - 仓库事件由 `.cnb.yml` 调用官方 `cnbcool/webhook` 镜像转发到 Jenkins；
-- Jenkins 结果写入 PR 评论以及带 `jenkins/...` 命名空间的 Commit/Tag annotations；
+- Jenkins 结果写入 PR 评论以及带 `jenkins_..._` 命名空间的 Commit/Tag annotations；
 - 原生 Commit Status 只读，可供 Pipeline 查询，但不能由 Jenkins 写入；
 - Release/Asset 和 CNB Build 使用 CNB 已公开的强类型 API，但不会被包装成 Deployment；
 - 定期索引与仓库动态轮询作为一致性回退；SCM Source 会按代码/PR 动态刷新，传统 Job 只回补
@@ -317,7 +317,9 @@ Publisher，Pipeline 可调用 `cnbBuildMetadata`。`cnbSkipReporting` Trait 只
 
 - 每个 context 独立，允许并行 stage 使用不同名称；
 - PR 评论带不可见幂等标记，重试时更新而不是重复创建；
-- annotations 只修改自己的 `jenkins/...` key，不覆盖其他系统的数据；
+- CNB annotation key 只允许 ASCII 字母、数字、下划线和连字符；插件使用
+  `jenkins_<context>-<hash>_<field>` 命名空间，只修改自己的 key，不覆盖其他系统的数据。字符约束见
+  [CNB annotations 官方说明](https://cnb.cool/cnb/plugins/cnbcool/annotations)；
 - 状态持久化在 `build.xml`，Jenkins 重启后继续对账；
 - 网络失败采用有上限的退避重试，不修改 Jenkins 原始构建结果。
 

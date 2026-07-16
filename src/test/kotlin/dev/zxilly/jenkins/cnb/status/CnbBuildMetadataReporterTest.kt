@@ -71,7 +71,8 @@ class CnbBuildMetadataReporterTest {
         assertEquals("created-1", result.commentId)
         val annotations = requireNotNull(recording.annotations)
         assertEquals(6, annotations.size)
-        assertTrue(annotations.all { it.key.startsWith("jenkins/team-release-pipeline-") })
+        assertTrue(annotations.all { it.key.matches(Regex("[A-Za-z0-9_-]+")) })
+        assertTrue(annotations.all { it.key.startsWith("jenkins_team-release-pipeline-") })
         assertEquals("success", annotations.single { it.key.endsWith("state") }.value)
         assertEquals("contributor/repo", recording.annotationRepository)
         val body = requireNotNull(recording.createdBody)
@@ -97,7 +98,8 @@ class CnbBuildMetadataReporterTest {
         assertEquals("v1.0.0", recording.tagAnnotationName)
         val annotations = requireNotNull(recording.tagAnnotations)
         assertEquals(6, annotations.size)
-        assertTrue(annotations.all { it.key.startsWith("jenkins/folder-job-") })
+        assertTrue(annotations.all { it.key.matches(Regex("[A-Za-z0-9_-]+")) })
+        assertTrue(annotations.all { it.key.startsWith("jenkins_folder-job-") })
         assertEquals("success", annotations.single { it.key.endsWith("state") }.value)
     }
 

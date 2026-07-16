@@ -31,6 +31,7 @@ import dev.zxilly.jenkins.cnb.api.model.CnbReleaseMakeLatest
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryRefType
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryStatus
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryVisibility
+import dev.zxilly.jenkins.cnb.api.model.CnbTagAnnotation
 import dev.zxilly.jenkins.cnb.api.model.CnbUpdatePullRequestRequest
 import dev.zxilly.jenkins.cnb.api.model.CnbUpdateReleaseRequest
 import dev.zxilly.jenkins.cnb.config.CnbServer
@@ -1679,20 +1680,20 @@ class HttpCnbClientTest {
     }
 
     @Test
-    fun `treats missing annotations as empty and deletes an encoded annotation key`() {
+    fun `treats missing annotations as empty and deletes a valid annotation key`() {
         handlers["/org/repo/-/git/commit-annotations/missing"] = { exchange ->
             respond(exchange, 404, """{"errcode":404}""")
         }
-        handlers["/org/repo/-/git/commit-annotations/abc123/jenkins/job result"] = { exchange ->
+        handlers["/org/repo/-/git/commit-annotations/abc123/jenkins_job-result"] = { exchange ->
             respond(exchange, 204, "")
         }
 
         assertTrue(client.getCommitAnnotations("org/repo", "missing").isEmpty())
-        client.deleteCommitAnnotation("org/repo", "abc123", "jenkins/job result")
+        client.deleteCommitAnnotation("org/repo", "abc123", "jenkins_job-result")
 
         val delete = requests.last()
         assertEquals("DELETE", delete.method)
-        assertTrue(delete.rawPath.endsWith("/jenkins%2Fjob%20result"))
+        assertTrue(delete.rawPath.endsWith("/jenkins_job-result"))
     }
 
     @Test
@@ -1702,6 +1703,22 @@ class HttpCnbClientTest {
         }
         assertThrows(IllegalArgumentException::class.java) {
             client.putCommitAnnotations("org/repo", "sha", listOf(CnbCommitAnnotation("", "value")))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            client.putCommitAnnotations("org/repo", "sha", listOf(CnbCommitAnnotation("jenkins/result", "value")))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            client.putTagAnnotations(
+                "org/repo",
+                "v1.0.0",
+                listOf(CnbTagAnnotation("jenkins.result", "value")),
+            )
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            client.deleteCommitAnnotation("org/repo", "sha", "jenkins/result")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            client.deleteTagAnnotation("org/repo", "release/2026", "jenkins/result")
         }
         assertThrows(IllegalArgumentException::class.java) {
             client.putCommitAnnotations("org/repo", "sha", listOf(CnbCommitAnnotation("key", "x".repeat(16_385))))
@@ -1717,13 +1734,13 @@ class HttpCnbClientTest {
                 respond(
                     exchange,
                     200,
-                    """[{"key":"jenkins/result","value":"SUCCESS","meta":{"operator":"alice","future":true},"unknown":1}]""",
+                    """[{"key":"jenkins_result","value":"SUCCESS","meta":{"operator":"alice","future":true},"unknown":1}]""",
                 )
             } else {
                 respond(exchange, 200, "")
             }
         }
-        handlers["/org/repo/-/git/tag-annotations/release/2026/jenkins/result"] = { exchange ->
+        handlers["/org/repo/-/git/tag-annotations/release/2026/jenkins_result"] = { exchange ->
             respond(exchange, 200, "")
         }
 
@@ -1731,18 +1748,15 @@ class HttpCnbClientTest {
         client.putTagAnnotations(
             "org/repo",
             "release/2026",
-            listOf(
-                dev.zxilly.jenkins.cnb.api.model
-                    .CnbTagAnnotation("jenkins/result", "SUCCESS"),
-            ),
+            listOf(CnbTagAnnotation("jenkins_result", "SUCCESS")),
         )
-        client.deleteTagAnnotation("org/repo", "release/2026", "jenkins/result")
+        client.deleteTagAnnotation("org/repo", "release/2026", "jenkins_result")
 
-        assertEquals("jenkins/result", annotation.key)
+        assertEquals("jenkins_result", annotation.key)
         assertEquals("alice", annotation.meta.operator)
         assertTrue(requests[1].body.contains("\"annotations\""))
         assertTrue(requests[1].rawPath.endsWith("/release%2F2026"))
-        assertTrue(requests.last().rawPath.endsWith("/release%2F2026%2Fjenkins%2Fresult"))
+        assertTrue(requests.last().rawPath.endsWith("/release%2F2026%2Fjenkins_result"))
     }
 
     @Test
@@ -2304,12 +2318,15 @@ class HttpCnbClientTest {
         client.putCommitAnnotations(
             "org/repo",
             "abc123",
-            listOf(CnbCommitAnnotation("jenkins/job/result", "SUCCESS")),
+            listOf(CnbCommitAnnotation("jenkins_job_result", "SUCCESS")),
         )
 
         val request = requests.single()
         assertEquals("PUT", request.method)
-        assertTrue(request.body.contains("jenkins/job/result"))
+        assertEquals(
+            """{"annotations":[{"key":"jenkins_job_result","value":"SUCCESS"}]}""",
+            request.body,
+        )
         assertFalse(request.body.contains("top-secret"))
     }
 

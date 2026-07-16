@@ -1035,7 +1035,7 @@ internal class HttpCnbClient(
     ) {
         require(annotations.size <= MAX_ANNOTATIONS) { "At most $MAX_ANNOTATIONS annotations may be written at once" }
         annotations.forEach { annotation ->
-            require(annotation.key.length in 1..MAX_ANNOTATION_KEY_LENGTH) { "Invalid annotation key length" }
+            requireValidAnnotationKey(annotation.key)
             require(annotation.value.length <= MAX_ANNOTATION_VALUE_LENGTH) { "Annotation value is too long" }
         }
         val body =
@@ -1055,6 +1055,7 @@ internal class HttpCnbClient(
         sha: String,
         key: String,
     ) {
+        requireValidAnnotationKey(key)
         requestNoContent(
             "DELETE",
             "/${encodeRepository(repo)}/-/git/commit-annotations/${encodeSegment(sha)}/${encodeSegment(key)}",
@@ -1107,7 +1108,7 @@ internal class HttpCnbClient(
     ) {
         require(annotations.size <= MAX_ANNOTATIONS) { "At most $MAX_ANNOTATIONS annotations may be written at once" }
         annotations.forEach { annotation ->
-            require(annotation.key.length in 1..MAX_ANNOTATION_KEY_LENGTH) { "Invalid annotation key length" }
+            requireValidAnnotationKey(annotation.key)
             require(annotation.value.length <= MAX_ANNOTATION_VALUE_LENGTH) { "Annotation value is too long" }
         }
         val body = CnbAnnotationsRequestWire(annotations.map { CnbAnnotationMutationWire(it.key, it.value) })
@@ -1124,7 +1125,7 @@ internal class HttpCnbClient(
         tag: String,
         key: String,
     ) {
-        require(key.length in 1..MAX_ANNOTATION_KEY_LENGTH) { "Invalid annotation key length" }
+        requireValidAnnotationKey(key)
         requestNoContent(
             "DELETE",
             "/${encodeRepository(repo)}/-/git/tag-annotations/${encodeSegment("$tag/$key")}",
@@ -1562,6 +1563,13 @@ internal class HttpCnbClient(
         value: T,
         serializer: SerializationStrategy<T>,
     ): String = sha256(CnbJsonCodec.canonicalBytes(serializer, value))
+
+    private fun requireValidAnnotationKey(key: String) {
+        require(key.length in 1..MAX_ANNOTATION_KEY_LENGTH) { "Invalid annotation key length" }
+        require(ANNOTATION_KEY_PATTERN.matches(key)) {
+            "Annotation key may contain only ASCII letters, digits, underscores, and hyphens"
+        }
+    }
 
     private fun sha256(value: ByteArray): String = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value))
 
@@ -3645,6 +3653,7 @@ internal class HttpCnbClient(
         private const val MAX_ANNOTATIONS = 100
         private const val MAX_ANNOTATION_KEY_LENGTH = 256
         private const val MAX_ANNOTATION_VALUE_LENGTH = 16_384
+        private val ANNOTATION_KEY_PATTERN = Regex("[A-Za-z0-9_-]+")
         private const val BASE_BACKOFF_MILLIS = 500L
         private const val MAX_BACKOFF_MILLIS = 10_000L
         private const val MAX_RETRY_AFTER_SECONDS = 60L
