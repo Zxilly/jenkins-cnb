@@ -54,10 +54,10 @@
     <changelist>-SNAPSHOT</changelist>
     <scmTag>HEAD</scmTag>
 
-    <jenkins.version>2.568.1</jenkins.version>
-    <jenkins.baseline>2.568</jenkins.baseline>
-    <maven.compiler.release>21</maven.compiler.release>
-    <maven.compiler.testRelease>21</maven.compiler.testRelease>
+    <jenkins.version>2.541.3</jenkins.version>
+    <jenkins.baseline>2.541</jenkins.baseline>
+    <maven.compiler.release>17</maven.compiler.release>
+    <maven.compiler.testRelease>17</maven.compiler.testRelease>
     <kotlin.version>2.4.10</kotlin.version>
     <kotlinx.serialization.version>1.11.0</kotlinx.serialization.version>
     <httpclient5.version>5.6.2</httpclient5.version>
@@ -65,8 +65,8 @@
     <jacoco.version>0.8.15</jacoco.version>
     <spotless.version>3.8.0</spotless.version>
     <coverage.minimum.line>0.86</coverage.minimum.line>
-    <kotlin.compiler.jdkRelease>21</kotlin.compiler.jdkRelease>
-    <kotlin.compiler.jvmTarget>21</kotlin.compiler.jvmTarget>
+    <kotlin.compiler.jdkRelease>17</kotlin.compiler.jdkRelease>
+    <kotlin.compiler.jvmTarget>17</kotlin.compiler.jvmTarget>
     <kotlin.compiler.javaParameters>true</kotlin.compiler.javaParameters>
     <kotlin.compiler.incremental>false</kotlin.compiler.incremental>
     <kapt.include.compile.classpath>false</kapt.include.compile.classpath>

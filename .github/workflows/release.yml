@@ -23,7 +23,7 @@ jobs:
       - uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5
         with:
           distribution: temurin
-          java-version: "25"
+          java-version: "17"
           cache: maven
       - name: Validate release tag and source branch
         env:
@@ -58,8 +58,8 @@ jobs:
             | tr -d '\r' > "$RUNNER_TEMP/cnb-manifest.mf"
           grep -Fx 'Short-Name: cnb' "$RUNNER_TEMP/cnb-manifest.mf"
           grep -Fx "Plugin-Version: ${VERSION#v}" "$RUNNER_TEMP/cnb-manifest.mf"
-          grep -Fx 'Jenkins-Version: 2.568.1' "$RUNNER_TEMP/cnb-manifest.mf"
-          grep -Fx 'Java-Version: 21' "$RUNNER_TEMP/cnb-manifest.mf"
+          grep -Fx 'Jenkins-Version: 2.541.3' "$RUNNER_TEMP/cnb-manifest.mf"
+          grep -Fx 'Java-Version: 17' "$RUNNER_TEMP/cnb-manifest.mf"
           grep -Fx "Plugin-ScmTag: $VERSION" "$RUNNER_TEMP/cnb-manifest.mf"
           grep -Fx "Implementation-Build: $TAG_COMMIT" "$RUNNER_TEMP/cnb-manifest.mf"
 

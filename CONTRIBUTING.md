@@ -2,7 +2,7 @@
 
 Contributions are welcome through issues and pull requests.
 
-1. Use Java 21 or 25 and the checked-in Maven Wrapper.
+1. Use Java 17, 21, or 25 and the checked-in Maven Wrapper.
 2. Keep the CNB public API boundary explicit; do not add calls to undocumented status or webhook CRUD
    endpoints.
 3. Add focused unit tests and Jenkins test-harness integration tests for behavior, failure handling,

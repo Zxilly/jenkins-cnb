@@ -15,8 +15,8 @@ Organization Folder，并以 CNB 当前公开 OpenAPI 的能力为边界。
 
 ## 运行要求
 
-- Jenkins `2.568.1` 或更高版本；
-- Controller 以及加载本插件的 Agent 使用 Java 21 或 25；
+- Jenkins `2.541.3` 或更高版本；
+- Controller 以及加载本插件的 Agent 使用 Java 17、21 或 25；
 - 按最小权限创建的 CNB 访问令牌；
 - 生产环境的 CNB Web/API、Jenkins Webhook 和 Git checkout 端点全部使用 HTTPS；
 - Git、SCM API、Branch API、Credentials、Plain Credentials、Pipeline Multibranch 和
@@ -304,13 +304,13 @@ Publisher，Pipeline 可调用 `cnbBuildMetadata`。`cnbSkipReporting` Trait 只
 ./mvnw hpi:run
 ```
 
-项目使用 Jenkins LTS 2.568.1、Plugin Parent `6.2211.v27f680c93c53`、Jenkins BOM
+项目使用 Jenkins LTS 2.541.3、Plugin Parent `6.2211.v27f680c93c53`、Jenkins BOM
 `6699.v4f03a_ff2f9c2`、Kotlin 2.4.10、kotlinx.serialization 1.11.0、RE2/J 1.8、Maven
-3.9.16（Wrapper 3.3.4）、ktlint 1.8.0 和 JaCoCo 0.8.15，生成 Java 21 bytecode，并在 Java
-21/25 与 Windows/Linux 上运行 CI。每次 `verify` 都会执行单元测试和 Jenkins Test Harness 集成测试，
+3.9.16（Wrapper 3.3.4）、ktlint 1.8.0 和 JaCoCo 0.8.15，生成 Java 17 bytecode，并在 Java
+17/21/25 与 Windows/Linux 上运行 CI。每次 `verify` 都会执行单元测试和 Jenkins Test Harness 集成测试，
 包括 JCasC、Jenkins 重启持久化、Webhook/队列、SCM Source、Pipeline 与安全失败路径，生成
 `target/site/jacoco`，并强制聚合行覆盖率不低于 86%（高于项目要求的 85%）。GitHub Actions
-还在 Ubuntu Java 21/25、Windows Java 21 上分别构建，并运行 Jenkins Security Scan。
+还在 Ubuntu Java 17/21/25、Windows Java 17 上分别构建，并运行 Jenkins Security Scan。
 
 发布前还必须在全新的 Docker Jenkins LTS 上安装本次 HPI，针对真实 CNB 测试仓库执行烟测：
 验证全局配置与健康页、HTTPS checkout、传统 Job 与 Multibranch 构建、Smee 到本地 Jenkins 的

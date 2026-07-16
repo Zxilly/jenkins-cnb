@@ -50,17 +50,29 @@ internal interface CnbHttpTransport : AutoCloseable {
 internal object CnbHttpTransportFactory {
     fun create(server: CnbServer): CnbHttpTransport =
         if (server.allowPrivateNetwork) {
+            createJdkTransport(server)
+        } else {
+            PinnedCnbHttpTransport(server.connectTimeoutSeconds, server.requestTimeoutSeconds)
+        }
+
+    private fun createJdkTransport(server: CnbServer): CnbHttpTransport {
+        val executor = transportExecutor(JdkCnbHttpTransport::class.java.name)
+        return try {
             JdkCnbHttpTransport(
                 ProxyConfiguration
                     .newHttpClientBuilder()
                     .connectTimeout(Duration.ofSeconds(server.connectTimeoutSeconds.toLong()))
                     .followRedirects(HttpClient.Redirect.NEVER)
                     .version(HttpClient.Version.HTTP_2)
+                    .executor(executor)
                     .build(),
+                executor,
             )
-        } else {
-            PinnedCnbHttpTransport(server.connectTimeoutSeconds, server.requestTimeoutSeconds)
+        } catch (failure: Throwable) {
+            executor.shutdownNow()
+            throw failure
         }
+    }
 }
 
 /**
@@ -86,13 +98,16 @@ internal class CnbPublicDnsResolver(
 
 private class JdkCnbHttpTransport(
     private val delegate: HttpClient,
+    private val executor: ExecutorService,
 ) : CnbHttpTransport {
     override fun <T> sendAsync(
         request: HttpRequest,
         bodyHandler: HttpResponse.BodyHandler<T>,
     ): CompletableFuture<HttpResponse<T>> = delegate.sendAsync(request, bodyHandler)
 
-    override fun close() = delegate.close()
+    override fun close() {
+        executor.shutdownNow()
+    }
 }
 
 private class PinnedCnbHttpTransport(
@@ -335,12 +350,14 @@ private class PinnedCnbHttpTransport(
         private const val MAX_CONNECTIONS = 8
         private const val RESPONSE_BUFFER_BYTES = 16 * 1024
         private val NO_BODY_METHODS = setOf("GET", "HEAD", "DELETE")
-        private val EXECUTOR: ExecutorService =
-            Executors.newCachedThreadPool(
-                NamingThreadFactory(
-                    ClassLoaderSanityThreadFactory(DaemonThreadFactory()),
-                    PinnedCnbHttpTransport::class.java.name,
-                ),
-            )
+        private val EXECUTOR: ExecutorService = transportExecutor(PinnedCnbHttpTransport::class.java.name)
     }
 }
+
+private fun transportExecutor(name: String): ExecutorService =
+    Executors.newCachedThreadPool(
+        NamingThreadFactory(
+            ClassLoaderSanityThreadFactory(DaemonThreadFactory()),
+            name,
+        ),
+    )
