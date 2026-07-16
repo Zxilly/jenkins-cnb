@@ -43,7 +43,12 @@ class CnbSCMBuilder(
                     withRefSpec(
                         "+refs/heads/${head.sourceBranch}:refs/remotes/@{remote}/${head.name}",
                     )
-                    withBrowser(CnbRepositoryBrowser(source.webUrlFor(head.sourceRepository)))
+                    withBrowser(
+                        CnbRepositoryBrowser(
+                            source.webUrlFor(head.sourceRepository),
+                            source.targetWebUrl(),
+                        ),
+                    )
                     if (head.checkoutStrategy == ChangeRequestCheckoutStrategy.MERGE) {
                         withAdditionalRemote(
                             UPSTREAM_REMOTE,

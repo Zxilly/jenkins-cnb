@@ -19,6 +19,7 @@ import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryVisibility
 import dev.zxilly.jenkins.cnb.config.CnbGlobalConfiguration
 import dev.zxilly.jenkins.cnb.config.CnbServer
 import hudson.model.TaskListener
+import hudson.plugins.git.GitChangeSet
 import hudson.plugins.git.GitSCM
 import jenkins.plugins.git.MergeWithGitSCMExtension
 import jenkins.scm.api.SCMHeadOrigin
@@ -114,6 +115,7 @@ class CnbSCMIntegrationTest {
 
         val scm = source.build(head, revision) as GitSCM
         val merge = scm.extensions.filterIsInstance<MergeWithGitSCMExtension>().single()
+        val browser = assertInstanceOf(CnbRepositoryBrowser::class.java, scm.browser)
 
         assertEquals(
             listOf("https://cnb.cool/contributor/repo", "https://cnb.cool/acme/repo"),
@@ -122,6 +124,14 @@ class CnbSCMIntegrationTest {
         assertEquals("remotes/upstream/main", merge.baseName)
         assertEquals("b".repeat(40), merge.baseHash)
         assertEquals("PR-42", scm.branches.single().name)
+        assertEquals(
+            "https://cnb.cool/contributor/repo/-/commit/${"a".repeat(40)}",
+            browser.getChangeSetLink(GitChangeSet(listOf("commit ${"a".repeat(40)}"), true)).toExternalForm(),
+        )
+        assertEquals(
+            "https://cnb.cool/acme/repo/-/pulls/42",
+            browser.pullRequestLink("42").toExternalForm(),
+        )
     }
 
     @Test
