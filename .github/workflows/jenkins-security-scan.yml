@@ -35,15 +35,15 @@ jobs:
           java-version: "25"
           cache: maven
 
-      # CodeQL 2.26.0 is the current stable bundle. Pin both its version and digest so the
+      # CodeQL 2.26.1 is the current stable bundle. Pin both its version and digest so the
       # analysis toolchain is reproducible and does not silently move ahead of validation.
-      - name: Fetch verified CodeQL 2.26.0
+      - name: Fetch verified CodeQL 2.26.1
         shell: bash
         run: |
           curl -fsSL --retry 5 --retry-all-errors \
-            https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.26.0/codeql-bundle-linux64.tar.zst \
+            https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.26.1/codeql-bundle-linux64.tar.zst \
             -o "$RUNNER_TEMP/codeql-bundle-linux64.tar.zst"
-          echo 'eeaaffa28291513a11565654d9828bac39d9234375a6fc0cd698f61c6d007bae  '"$RUNNER_TEMP/codeql-bundle-linux64.tar.zst" \
+          echo '02cb5f5d2ae8332ffc65b889eac2c88a4b57f5c66c5ebddc90ebf1c24eefcf67  '"$RUNNER_TEMP/codeql-bundle-linux64.tar.zst" \
             | sha256sum -c --strict
 
       - name: Initialize CodeQL
