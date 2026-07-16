@@ -284,6 +284,10 @@ internal class HttpCnbClient(
             transform = ::parseLabel,
         )
 
+    @SuppressFBWarnings(
+        value = ["BC_BAD_CAST_TO_ABSTRACT_COLLECTION"],
+        justification = "Kotlin's inline collection mapping allocates a concrete ArrayList that SpotBugs loses in SMAP bytecode.",
+    )
     override fun listBadges(repo: String): List<CnbBadgeSummary> {
         val path = "/${encodeRepository(repo)}/-/badge/list"
         val bytes =
@@ -309,6 +313,10 @@ internal class HttpCnbClient(
         return wires.map { parseBadgeSummary(repo, it) }
     }
 
+    @SuppressFBWarnings(
+        value = ["BC_BAD_CAST_TO_ABSTRACT_COLLECTION"],
+        justification = "Kotlin's inline collection mapping allocates a concrete ArrayList that SpotBugs loses in SMAP bytecode.",
+    )
     override fun getBadge(
         repo: String,
         badge: String,
