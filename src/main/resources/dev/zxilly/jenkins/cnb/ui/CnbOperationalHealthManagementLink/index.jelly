@@ -1,0 +1,42 @@
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core" xmlns:l="/lib/layout">
+  <l:settings-subpage permission="${app.ADMINISTER}" title="${%title}" description="${%description}">
+    <j:set var="healthSnapshot" value="${it.snapshot}" />
+    <p class="jenkins-description">
+      ${%generatedAt}: ${healthSnapshot.generatedAt}
+    </p>
+    <table class="jenkins-table sortable">
+      <thead>
+        <tr>
+          <th>${%server}</th>
+          <th>${%repository}</th>
+          <th>${%component}</th>
+          <th>${%lastSuccess}</th>
+          <th>${%lastFailure}</th>
+          <th>${%summary}</th>
+        </tr>
+      </thead>
+      <tbody>
+        <j:choose>
+          <j:when test="${healthSnapshot.entries.isEmpty()}">
+            <tr>
+              <td colspan="6">${%empty}</td>
+            </tr>
+          </j:when>
+          <j:otherwise>
+            <j:forEach var="entry" items="${healthSnapshot.entries}">
+              <tr>
+                <td>${entry.serverId}</td>
+                <td>${entry.repository}</td>
+                <td>${entry.componentDisplayName}</td>
+                <td>${entry.lastSuccessDisplay}</td>
+                <td>${entry.lastFailureDisplay}</td>
+                <td>${entry.summary}</td>
+              </tr>
+            </j:forEach>
+          </j:otherwise>
+        </j:choose>
+      </tbody>
+    </table>
+  </l:settings-subpage>
+</j:jelly>
