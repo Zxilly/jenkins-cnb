@@ -15,6 +15,10 @@
     <Bug pattern="NP_NONNULL_PARAM_VIOLATION,NP_NULL_ON_SOME_PATH_FROM_RETURN_VALUE" />
   </Match>
   <Match>
+    <Class name="~dev\.zxilly\.jenkins\.cnb\.api\.HttpCnbClient\$putSignedReleaseAsset\$response\$1.*" />
+    <Bug pattern="NP_NONNULL_PARAM_VIOLATION" />
+  </Match>
+  <Match>
     <Class name="~dev\.zxilly\.jenkins\.cnb\.api\.HttpCnbClient\$executeDownload\$.*" />
     <Bug pattern="NP_NONNULL_PARAM_VIOLATION,NP_NULL_ON_SOME_PATH_FROM_RETURN_VALUE" />
   </Match>

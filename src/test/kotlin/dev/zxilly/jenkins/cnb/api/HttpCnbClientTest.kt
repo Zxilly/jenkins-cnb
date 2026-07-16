@@ -53,6 +53,7 @@ import java.time.Instant
 import java.time.ZonedDateTime
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -2264,6 +2265,73 @@ class HttpCnbClientTest {
     @Test
     fun `reopens an exact release asset stream across a 308 signed redirect`() {
         assertSignedUploadRedirect(308)
+    }
+
+    @Test
+    fun `follows a signed upload redirect before its unfinished response body completes`() {
+        val artifact = "redirected-artifact".toByteArray(StandardCharsets.UTF_8)
+        val opened = AtomicInteger()
+        val closed = AtomicInteger()
+        val releaseRedirectBody = CountDownLatch(1)
+        val finalUploadStarted = CountDownLatch(1)
+        val uploadExecutor = Executors.newSingleThreadExecutor()
+        configureReleaseUploadTicket(
+            uploadUrl = "http://127.0.0.1:${server.address.port}/object/upload-start?signature=first",
+        )
+        handlers["/object/upload-start"] = { exchange ->
+            exchange.responseHeaders.add(
+                "Location",
+                "http://127.0.0.1:${server.address.port}/object/upload-final?signature=second",
+            )
+            exchange.sendResponseHeaders(307, 0)
+            try {
+                releaseRedirectBody.await()
+            } finally {
+                exchange.responseBody.close()
+            }
+        }
+        handlers["/object/upload-final"] = { exchange ->
+            finalUploadStarted.countDown()
+            respond(exchange, 200, "")
+        }
+        handlers[
+            "/org/repo/-/releases/release-1/asset-upload-confirmation/token//org/repo/-/releases/download/v1.0.0/plugin.hpi",
+        ] = { exchange -> respond(exchange, 204, "") }
+
+        val upload =
+            uploadExecutor.submit {
+                client.uploadReleaseAsset(
+                    "org/repo",
+                    "release-1",
+                    CnbReleaseAssetUploadRequest("plugin.hpi", artifact.size.toLong(), ttlDays = 30),
+                    CnbRepeatableInput {
+                        opened.incrementAndGet()
+                        object : ByteArrayInputStream(artifact) {
+                            override fun close() {
+                                closed.incrementAndGet()
+                                super.close()
+                            }
+                        }
+                    },
+                )
+            }
+        try {
+            assertTrue(
+                finalUploadStarted.await(5, TimeUnit.SECONDS),
+                "redirected upload did not start before the first response body completed",
+            )
+            releaseRedirectBody.countDown()
+            upload.get(5, TimeUnit.SECONDS)
+        } finally {
+            releaseRedirectBody.countDown()
+            upload.cancel(true)
+            uploadExecutor.shutdownNow()
+            assertTrue(uploadExecutor.awaitTermination(5, TimeUnit.SECONDS), "upload executor did not stop")
+        }
+
+        assertEquals(2, opened.get())
+        assertEquals(2, closed.get())
+        assertEquals(1, requests.count { it.rawPath.contains("asset-upload-confirmation") })
     }
 
     @Test

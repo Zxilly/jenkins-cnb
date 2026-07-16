@@ -662,6 +662,7 @@ private class KtorCnbHttpResponseContext(
     }
 
     override suspend fun discard() {
+        response.cancel(CancellationException("CNB HTTP response body was discarded"))
         cancelRemaining()
     }
 

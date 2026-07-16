@@ -2176,7 +2176,15 @@ internal class HttpCnbClient(
                     body = CnbHttpRequestBody.RepeatableStream(size, source::openStream),
                     negotiateCnbJson = false,
                 )
-            val response = sendRequest(request) { it.readBoundedBytes(MAX_UPLOAD_RESPONSE_BYTES) }
+            val response =
+                sendRequest(request) { context ->
+                    if (context.statusCode in SIGNED_UPLOAD_REDIRECT_STATUS_CODES) {
+                        context.discard()
+                        ByteArray(0)
+                    } else {
+                        context.readBoundedBytes(MAX_UPLOAD_RESPONSE_BYTES)
+                    }
+                }
             when {
                 response.statusCode in 200..299 -> {
                     return
