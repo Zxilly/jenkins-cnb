@@ -42,6 +42,7 @@ fail closed。
 | 仓库状态/可见性 | `RepoStatus`、`Visibility` | 正常 Public/Private 仓库可构建；Archived 仅在显式启用时发现，Forking/Secret/未知值 fail closed |
 | 分支 | list/get | 支持扫描、受保护/锁定过滤和 webhook 定向校验 |
 | Tag | list/get | 支持 Tag discovery、构建和定向校验 |
+| 仓库标签目录 | `GET /{repo}/-/labels` | Classic/Multibranch 标签联想与保存时警告；有界、item/凭据隔离缓存 |
 | Commit | get/list/compare | 支持变更、作者、父提交和 changed-files 查询 |
 | 仓库内容 | contents/raw | Jenkinsfile、文件和目录探测；二进制和大小有硬上限 |
 | PR | list/get/batch | 支持同仓与 Fork PR、HEAD/MERGE、Draft、过滤和信任策略 |
@@ -55,7 +56,7 @@ fail closed。
 | 创建/更新 PR | POST/PATCH pulls | 强类型显式 Pipeline 操作；不会由 webhook 自动执行 |
 | PR assignee | list/add/remove | 支持批量显式操作 |
 | PR reviewer | add/remove | 支持批量显式操作 |
-| PR 标签 | list/add/replace/remove/clear | Trait 过滤、只读查询和显式修改 |
+| PR 标签 | list/add/replace/remove/clear | Classic/Multibranch 实时过滤、只读查询和显式修改 |
 | PR 评论 | list/get/create/update | 生命周期评论幂等更新；评论触发按 ID 回读并核对完整正文与作者 |
 | PR Review | list/create | 支持 comment、approve、request changes 及行级评论请求 |
 | Review comment | list/reply | 支持强类型行号、side、subject 和 reply-to ID |
@@ -119,6 +120,14 @@ webhook payload。
 实时 description）并识别 `[ci-skip]`、`[ci skip]`、`[skip ci]`；也可选择仅在 PR source SHA 相比同一 Job/PR 最近一次
 排队或已记录构建发生变化时触发。前者不信任事件中的提交消息，后者复用持久 `CnbQueueAction`，无需
 另建可竞态的可变 webhook 状态。
+
+目标分支 push 可列出开放 PR，并在首次队列修改前逐个回读 PR、目标 branch、源 branch、标签和提交。
+Classic Job 还要求 GitSCM 中存在与源仓库等价的 remote；否则该 PR fail closed。构建开始后可用
+有界 CNB Cause 填充空描述，Git changelog 可生成目标 PR 与源仓库 Commit 链接。
+
+GitLab 的“新增指定标签时强制构建”依赖 webhook 的 previous/current label diff。CNB 当前公开
+OpenAPI、事件归档和官方 bridge 没有 previous labels；只读取当前标签无法区分新增、旧标签、漏事件或
+Controller 重启，因此本插件明确不提供不可靠的近似实现。
 
 ## 分页、重试和网络安全
 

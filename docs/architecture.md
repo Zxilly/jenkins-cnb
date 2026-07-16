@@ -47,6 +47,16 @@ JSON 对象直接通过显式 serializer 进入 typed DTO；`JsonNode`、`Object
 `Map<String, Any?>` 不会穿过传输边界。Pipeline 需要的 `LinkedHashMap` 只在最终 CPS adapter
 生成，且会移除 signed/API/browser URL 等不应泄露的字段。
 
+## 资源预算与流式限制
+
+所有远端内容都按不可信资源处理。限制分页页数、条目数、累计响应字节、单文件大小、并发、等待队列、
+请求时间和重定向跳数，是为了同时保护 Controller heap、Agent workspace 磁盘、HTTP 连接池和 Jenkins
+执行线程，而不是任意限制正常构建产物。
+
+Release Asset 与 Runner 日志使用流式 channel 边读边计数；下载先写同目录随机临时文件，长度和路径
+检查成功后才原子发布。上传固定 Content-Length 并在每次尝试前复核源文件。分页 JSON 仍有跨页累计
+字节预算，因此攻击者不能用许多“单页合法”的响应绕过总量限制。
+
 ## Webhook、实时校验和最终一致性
 
 Webhook delivery 是加速提示，不是事实来源。HMAC 在精确原始 body 上计算；插件先执行仓库级
@@ -61,6 +71,15 @@ cursor。传统 Job 只回补强类型 archive 字段能够精确重建的 Push/
 
 传统 Trigger 在第一次修改 Jenkins Queue 前完成全部远端读取。一个 delivery 的 PR revision、标签、
 评论和权限组成不可变实时快照；各 Job 对同一快照独立执行自己的事件、分支、Draft、标签和评论策略。
+某个 Job 所需的标签或提交字段无权限读取时，只让该 Job fail closed，不会阻止同仓库未启用该策略的
+其他 Job。
+
+目标分支 push 扩展为开放 PR 时，每个 Classic Job 还必须存在与实时 PR 源仓库等价的 GitSCM remote。
+插件把 GitSCM 配置中的精确 URI 写入 `RevisionParameterAction`；remote 缺失时不入队，避免 Git 插件
+忽略 revision action 后回退到默认分支。Multibranch 通过对应 SCM Source 完成同一约束。
+
+配置页仓库标签目录使用固定 worker/queue/timeout/TTL/条目上限，并按 Server、仓库、凭据和 Item
+隔离 single-flight/cache。表单超时只返回“不可用”警告，不把远端异常正文或凭据写入响应。
 
 PR 评论额外要求：
 
