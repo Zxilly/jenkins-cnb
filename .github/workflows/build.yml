@@ -38,12 +38,20 @@ jobs:
         include:
           - os: ubuntu-latest
             java: "17"
+            java_versions: |-
+              17
+              21
           - os: ubuntu-latest
             java: "21"
+            java_versions: "21"
           - os: ubuntu-latest
             java: "25"
+            java_versions: "25"
           - os: windows-latest
             java: "17"
+            java_versions: |-
+              17
+              21
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
@@ -53,11 +61,11 @@ jobs:
       - uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5
         with:
           distribution: temurin
-          java-version: ${{ matrix.java }}
+          java-version: ${{ matrix.java_versions }}
           cache: maven
       - name: Verify
         shell: bash
-        run: ./mvnw -B -ntp clean verify
+        run: ./mvnw -B -ntp -Dtest.jdk.version=${{ matrix.java }} clean verify
       - name: Upload HPI
         if: matrix.os == 'ubuntu-latest' && matrix.java == '25'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

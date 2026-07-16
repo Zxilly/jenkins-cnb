@@ -313,7 +313,8 @@ Publisher，Pipeline 可调用 `cnbBuildMetadata`。`cnbSkipReporting` Trait 只
 
 测试类默认在相互隔离的 JVM 中以 `0.45C` 并行执行；本地内存受限或需要复现顺序相关问题时，可
 使用 `./mvnw -DforkCount=1 test` 回退为串行。Jenkins Test Harness 依赖全局状态，因此不启用
-JUnit 方法级线程并行。
+JUnit 方法级线程并行。最新 Jenkins 注解处理器要求 Maven/KAPT 运行在 Java 21+；CI 通过 Maven
+Toolchains 让完整测试套件分别运行在 Java 17/21/25，并继续生成 Java 17 bytecode。
 
 发布前还必须在全新的 Docker Jenkins LTS 上安装本次 HPI，针对真实 CNB 测试仓库执行烟测：
 验证全局配置与健康页、HTTPS checkout、传统 Job 与 Multibranch 构建、Smee 到本地 Jenkins 的

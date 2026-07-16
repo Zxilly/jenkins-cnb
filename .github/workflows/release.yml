@@ -23,7 +23,9 @@ jobs:
       - uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: |-
+            17
+            21
           cache: maven
       - name: Validate release tag and source branch
         env:
@@ -48,6 +50,7 @@ jobs:
           -Drevision="${VERSION#v}"
           -Dchangelist=
           -DscmTag="$VERSION"
+          -Dtest.jdk.version=17
           clean verify
       - name: Verify HPI identity and bundled libraries
         env:
