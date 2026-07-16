@@ -57,6 +57,7 @@ Organization Folder、传统 Job Trigger、Cause、环境变量、PR/Fork 信任
 - Fork Jenkinsfile 默认不可信，代码 checkout 与 Jenkinsfile 来源分别决策；
 - 所有外部 JSON 使用 `kotlinx.serialization` 私有 Wire DTO，不使用 Jackson 或开放 Map 边界；
 - API、下载、分页、表单联想和队列操作都有资源上限与 fail-closed 行为；
+- 对照发现的公开 Webhook 无界读取已修复：声明长度和 chunked 累计 body 都限制为 1 MiB，超限返回 413；
 - 删除、覆盖、关闭等破坏性 Pipeline 操作要求精确 `confirm`，webhook 永不自动执行写操作。
 
 参考插件中的短板不会被照搬：GitHub 可在未配置 secret 时跳过签名校验；GitLab 可关闭公开项目端点

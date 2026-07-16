@@ -98,6 +98,10 @@ class CnbWebhookAction
                 writeJson(response, HttpServletResponse.SC_UNAUTHORIZED, CnbWebhookResponseStatus.REJECTED, duplicate = false)
                 return
             }
+            if (request.contentLengthLong > MAX_WEBHOOK_BODY_BYTES) {
+                writeJson(response, PAYLOAD_TOO_LARGE_STATUS, CnbWebhookResponseStatus.REJECTED, duplicate = false)
+                return
+            }
             val lease = admission.tryAcquire(validatedServerId)
             if (lease == null) {
                 response.setHeader("Retry-After", "1")
@@ -108,12 +112,17 @@ class CnbWebhookAction
             try {
                 val rawBody =
                     try {
-                        request.inputStream.use { it.readAllBytes() }
+                        request.inputStream.use { it.readNBytes(MAX_WEBHOOK_BODY_BYTES + 1) }
                     } catch (e: IOException) {
                         LOGGER.log(Level.FINE, "Failed to read a CNB webhook request body", e)
                         writeJson(response, HttpServletResponse.SC_BAD_REQUEST, CnbWebhookResponseStatus.REJECTED, duplicate = false)
                         return
                     }
+                if (rawBody.size > MAX_WEBHOOK_BODY_BYTES) {
+                    rawBody.fill(0)
+                    writeJson(response, PAYLOAD_TOO_LARGE_STATUS, CnbWebhookResponseStatus.REJECTED, duplicate = false)
+                    return
+                }
                 if (rawBody.isEmpty()) {
                     writeJson(response, HttpServletResponse.SC_BAD_REQUEST, CnbWebhookResponseStatus.REJECTED, duplicate = false)
                     return
@@ -203,6 +212,8 @@ class CnbWebhookAction
             const val URL_NAME = "cnb-webhook"
             const val SIGNATURE_HEADER = "X-CNB-Signature"
             private const val JSON_MEDIA_TYPE = "application/json"
+            private const val MAX_WEBHOOK_BODY_BYTES = 1024 * 1024
+            private const val PAYLOAD_TOO_LARGE_STATUS = 413
             private val RESPONSE_JSON = Json { encodeDefaults = true }
             private val HEALTH_CLASS_BOUNDARY = Regex("(?<=[a-z0-9])(?=[A-Z])")
             private val WEBHOOK_ROUTE_PATTERN = Regex("^/([A-Za-z0-9][A-Za-z0-9._-]{0,63})/?$")

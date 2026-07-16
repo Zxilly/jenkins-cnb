@@ -19,6 +19,7 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.jvnet.hudson.test.JenkinsRule
 import org.jvnet.hudson.test.junit.jupiter.WithJenkins
+import java.io.ByteArrayInputStream
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -75,6 +76,14 @@ class CnbWebhookActionIntegrationTest {
                 .replaceFirst("{", "{\"future_padding\":\"${"x".repeat(256 * 1024)}\",")
                 .toByteArray(StandardCharsets.UTF_8)
         assertResponse(send(client, endpoint, largeBody, sign(largeBody, SECRET)), 202, "accepted", false)
+        val oversizedBody =
+            payload("team/project", "oversized-delivery-${System.nanoTime()}")
+                .toString(StandardCharsets.UTF_8)
+                .replaceFirst("{", "{\"future_padding\":\"${"x".repeat(1024 * 1024)}\",")
+                .toByteArray(StandardCharsets.UTF_8)
+        val oversizedSignature = sign(oversizedBody, SECRET)
+        assertResponse(send(client, endpoint, oversizedBody, oversizedSignature), 413, "rejected", false)
+        assertResponse(sendChunked(client, endpoint, oversizedBody, oversizedSignature), 413, "rejected", false)
 
         val malformed = "{".toByteArray(StandardCharsets.UTF_8)
         assertResponse(send(client, endpoint, malformed, sign(malformed, SECRET)), 400, "rejected", false)
@@ -154,6 +163,22 @@ class CnbWebhookActionIntegrationTest {
         extraSignature?.let { request.header(CnbWebhookAction.SIGNATURE_HEADER, it) }
         request.method(method, if (method == "GET") HttpRequest.BodyPublishers.noBody() else HttpRequest.BodyPublishers.ofByteArray(body))
         return client.send(request.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+    }
+
+    private fun sendChunked(
+        client: HttpClient,
+        endpoint: URI,
+        body: ByteArray,
+        signature: String,
+    ): HttpResponse<String> {
+        val request =
+            HttpRequest
+                .newBuilder(endpoint)
+                .header("Content-Type", "application/json; charset=utf-8")
+                .header(CnbWebhookAction.SIGNATURE_HEADER, signature)
+                .POST(HttpRequest.BodyPublishers.ofInputStream { ByteArrayInputStream(body) })
+                .build()
+        return client.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
     }
 
     private fun assertResponse(

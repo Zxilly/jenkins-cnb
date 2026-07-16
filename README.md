@@ -200,6 +200,9 @@ CNB 没有可由 Jenkins 自动创建的仓库 Webhook。请按
 https://<jenkins>/cnb-webhook/<server-id>/
 ```
 
+公开入口在解析 JSON 或调用处理器前把请求体限制为 1 MiB：已声明的超限 `Content-Length` 会快速返回
+`413`，未知长度/chunked 请求也按实际累计字节执行同一上限，不能依靠省略或伪造 header 绕过。
+
 传统 Job 的 **Build on CNB code or pull request events** Trigger 可按事件、分支/Tag、PR 源分支、
 PR 目标分支、Draft/WIP、必需标签和排除标签过滤。默认只启用可信的 `push` 与 `tag_push`；不可信
 PR/评论事件必须显式开启。评论触发还必须配置非空 RE2/J 表达式和最低目标仓库成员角色，默认完全

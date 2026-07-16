@@ -126,6 +126,10 @@ webhook payload。
 重新读取 ref/PR revision。评论触发还要求显式 RE2/J 完整匹配、可寻址 comment ID、实时正文与
 作者一致，以及目标仓库的最低成员角色；默认最低角色为 Developer。
 
+Webhook 原始 body 在解析前有 1 MiB 硬上限。入口先快速拒绝超限 `Content-Length`，再以
+`max + 1` 字节有界读取覆盖未知长度和 chunked 传输；超限返回 `413`，不会调用处理器或创建攻击者可控的
+健康状态。
+
 传统 Job Trigger 还对齐 GitLab 插件的两项提交过滤能力：默认从 Commit API 回读头提交（PR 还检查
 实时 description）并识别 `[ci-skip]`、`[ci skip]`、`[skip ci]`；也可选择仅在 PR source SHA 相比同一 Job/PR 最近一次
 排队或已记录构建发生变化时触发。前者不信任事件中的提交消息，后者复用持久 `CnbQueueAction`，无需
