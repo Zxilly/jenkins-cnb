@@ -65,8 +65,12 @@ internal object CnbVerifiedWebhookPlanner {
             },
         ) { "CNB classic trigger verification scopes diverged" }
 
-        val directCandidates = candidates.filter { candidate -> candidate.trigger.matches(delivery) }
-        val targetPushCandidates = candidates.filter { candidate -> candidate.trigger.expandsOpenPullRequestsFor(delivery) }
+        val directCandidates = ArrayList<CnbClassicTriggerCandidate>(candidates.size)
+        val targetPushCandidates = ArrayList<CnbClassicTriggerCandidate>(candidates.size)
+        for (candidate in candidates) {
+            if (candidate.trigger.matches(delivery)) directCandidates.add(candidate)
+            if (candidate.trigger.expandsOpenPullRequestsFor(delivery)) targetPushCandidates.add(candidate)
+        }
         if (directCandidates.isEmpty() && targetPushCandidates.isEmpty()) return emptyList()
 
         val directRequirements = requirementsFor(delivery, directCandidates)

@@ -45,10 +45,10 @@ internal class CnbRepositoryLabelFormSupport(
             } catch (failure: IllegalArgumentException) {
                 return FormValidation.error(failure.message)
             }
-        val configured =
-            (if (validateRequired) policy.requiredConfiguration else policy.excludedConfiguration)
-                .split(',')
-                .filter(String::isNotEmpty)
+        val configured = ArrayList<String>()
+        for (label in (if (validateRequired) policy.requiredConfiguration else policy.excludedConfiguration).split(',')) {
+            if (label.isNotEmpty()) configured.add(label)
+        }
         if (configured.isEmpty()) return FormValidation.ok()
         val request = request(item, serverId, repositoryPath, credentialsId) ?: return FormValidation.ok()
         return when (val catalog = lookup.lookup(request)) {
@@ -57,13 +57,20 @@ internal class CnbRepositoryLabelFormSupport(
             }
 
             is CnbRepositoryLabelCatalogResult.Available -> {
-                val unknown = configured.filterNot(catalog.labels.toHashSet()::contains)
+                val known = HashSet(catalog.labels)
+                var unknown = false
+                for (label in configured) {
+                    if (label !in known) {
+                        unknown = true
+                        break
+                    }
+                }
                 when {
                     !catalog.complete -> {
                         FormValidation.warning("CNB has more labels than the configuration catalog can display")
                     }
 
-                    unknown.isNotEmpty() -> {
+                    unknown -> {
                         FormValidation.warning("One or more labels were not found in the CNB repository")
                     }
 

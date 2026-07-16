@@ -2,6 +2,7 @@ package dev.zxilly.jenkins.cnb.trigger
 
 import dev.zxilly.jenkins.cnb.api.CnbClientFactory
 import dev.zxilly.jenkins.cnb.api.model.CnbLabel
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings
 import hudson.init.Terminator
 import hudson.model.Item
 import java.time.Duration
@@ -188,6 +189,10 @@ internal class CnbCachingRepositoryLabelCatalog(
     }
 }
 
+@SuppressFBWarnings(
+    value = ["SSD_DO_NOT_USE_INSTANCE_LOCK_ON_SHARED_STATIC_DATA", "ST_WRITE_TO_STATIC_FROM_INSTANCE_METHOD"],
+    justification = "A Kotlin object is one JVM singleton; its instance monitor protects the generated static backing field.",
+)
 internal object CnbRepositoryLabelCatalogRuntime : CnbRepositoryLabelLookup {
     @Volatile
     private var current: CnbCachingRepositoryLabelCatalog? = null

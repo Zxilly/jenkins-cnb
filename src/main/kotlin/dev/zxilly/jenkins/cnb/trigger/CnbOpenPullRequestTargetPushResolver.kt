@@ -77,9 +77,11 @@ internal object CnbOpenPullRequestTargetPushResolver {
             val labels =
                 if (requirements.labels) {
                     missingOrUnauthorized {
-                        client
-                            .listPullLabels(targetRepository, normalized.number)
-                            .mapTo(linkedSetOf()) { label -> label.name }
+                        val names = LinkedHashSet<String>()
+                        for (label in client.listPullLabels(targetRepository, normalized.number)) {
+                            names.add(label.name)
+                        }
+                        names
                     }
                 } else {
                     null
