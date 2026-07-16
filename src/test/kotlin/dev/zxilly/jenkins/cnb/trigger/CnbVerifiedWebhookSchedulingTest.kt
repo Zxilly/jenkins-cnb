@@ -23,13 +23,17 @@ import dev.zxilly.jenkins.cnb.webhook.CnbWebhookPullRequest
 import dev.zxilly.jenkins.cnb.webhook.CnbWebhookRef
 import dev.zxilly.jenkins.cnb.webhook.CnbWebhookRepository
 import hudson.model.Queue
+import hudson.plugins.git.GitSCM
 import hudson.plugins.git.RevisionParameterAction
+import org.eclipse.jgit.api.Git
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.jvnet.hudson.test.JenkinsRule
 import org.jvnet.hudson.test.junit.jupiter.WithJenkins
 import java.lang.reflect.Proxy
+import java.nio.file.Files
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -38,6 +42,9 @@ class CnbVerifiedWebhookSchedulingTest {
     @WithJenkins
     fun `classic target push plans every verified open pull request with its source checkout`(jenkins: JenkinsRule) {
         val enabledJob = jenkins.createFreeStyleProject("target-push-prs")
+        enabledJob.scm = GitSCM("https://cnb.cool/alice/project")
+        val mismatchedJob = jenkins.createFreeStyleProject("target-push-wrong-remote")
+        mismatchedJob.scm = GitSCM("https://cnb.cool/team/project.git")
         val disabledJob = jenkins.createFreeStyleProject("target-push-disabled")
         val enabled =
             CnbPushTrigger("primary", "team/project", "**").apply {
@@ -51,6 +58,12 @@ class CnbVerifiedWebhookSchedulingTest {
                 setTriggerOpenPullRequestOnPush("source")
                 setCiSkip(false)
             }
+        val mismatched =
+            CnbPushTrigger("primary", "team/project", "**").apply {
+                setEventFilter("tag_push")
+                setTriggerOpenPullRequestOnPush("both")
+                setCiSkip(false)
+            }
 
         val planned =
             CnbVerifiedWebhookPlanner.classic(
@@ -58,6 +71,7 @@ class CnbVerifiedWebhookSchedulingTest {
                 listOf(
                     CnbClassicTriggerCandidate(enabledJob, enabled),
                     CnbClassicTriggerCandidate(disabledJob, disabled),
+                    CnbClassicTriggerCandidate(mismatchedJob, mismatched),
                 ),
                 openClient = ::targetPushClient,
             )
@@ -70,6 +84,49 @@ class CnbVerifiedWebhookSchedulingTest {
         assertEquals(false, candidate.onlyIfNewPullRequestCommits)
         val checkout = requireNotNull(candidate.checkoutAction)
         assertEquals(SHA_A, checkout.commit)
+        assertTrue(checkout.canOriginateFrom((enabledJob.scm as GitSCM).repositories))
+    }
+
+    @Test
+    @WithJenkins
+    fun `classic revision action checks out the requested commit through the configured remote`(jenkins: JenkinsRule) {
+        val repository = Files.createTempDirectory(jenkins.jenkins.rootDir.toPath(), "cnb-source-")
+        val firstCommit =
+            Git.init().setDirectory(repository.toFile()).call().use { git ->
+                Files.writeString(repository.resolve("revision.txt"), "first")
+                git.add().addFilepattern("revision.txt").call()
+                val first =
+                    git
+                        .commit()
+                        .setMessage("first")
+                        .setAuthor("CNB Test", "cnb@example.invalid")
+                        .setCommitter("CNB Test", "cnb@example.invalid")
+                        .call()
+                        .id
+                        .name
+                Files.writeString(repository.resolve("revision.txt"), "second")
+                git.add().addFilepattern("revision.txt").call()
+                git
+                    .commit()
+                    .setMessage("second")
+                    .setAuthor("CNB Test", "cnb@example.invalid")
+                    .setCommitter("CNB Test", "cnb@example.invalid")
+                    .call()
+                first
+            }
+        val repositoryUrl = repository.toUri().toString()
+        val job = jenkins.createFreeStyleProject("exact-cnb-revision")
+        job.scm = GitSCM(repositoryUrl)
+        val action = requireNotNull(CnbClassicGitRevisionAction.create(job, firstCommit, repositoryUrl))
+        val previous = GitSCM.ALLOW_LOCAL_CHECKOUT
+
+        try {
+            GitSCM.ALLOW_LOCAL_CHECKOUT = true
+            val build = jenkins.assertBuildStatusSuccess(job.scheduleBuild2(0, action))
+            assertEquals("first", requireNotNull(build.workspace).child("revision.txt").readToString())
+        } finally {
+            GitSCM.ALLOW_LOCAL_CHECKOUT = previous
+        }
     }
 
     @Test

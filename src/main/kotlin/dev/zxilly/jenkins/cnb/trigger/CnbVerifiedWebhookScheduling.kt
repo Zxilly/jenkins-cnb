@@ -23,7 +23,6 @@ import jenkins.scm.api.SCMHeadObserver
 import jenkins.scm.api.SCMRevisionAction
 import jenkins.scm.api.SCMSourceOwner
 import jenkins.scm.api.SCMSourceOwners
-import org.eclipse.jgit.transport.URIish
 import java.io.IOException
 import java.lang.reflect.InvocationTargetException
 import java.util.logging.Level
@@ -112,10 +111,15 @@ internal object CnbVerifiedWebhookPlanner {
                         val sourceSha =
                             pullRequest.delivery.payload.pullRequest
                                 ?.sourceSha ?: continue
-                        val checkout = RevisionParameterAction(sourceSha, URIish(pullRequest.sourceCloneUrl))
                         for (candidate in targetPushCandidates) {
                             val trigger = candidate.trigger
                             if (!trigger.matchesLive(pullRequest.delivery, pullRequest.snapshot)) continue
+                            val checkout =
+                                CnbClassicGitRevisionAction.create(
+                                    candidate.job,
+                                    sourceSha,
+                                    pullRequest.sourceCloneUrl,
+                                ) ?: continue
                             verified +=
                                 CnbVerifiedQueueCandidate(
                                     job = candidate.job,
