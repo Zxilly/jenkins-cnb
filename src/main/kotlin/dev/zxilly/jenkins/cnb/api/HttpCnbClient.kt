@@ -261,6 +261,14 @@ internal class HttpCnbClient(
             stableIdentity = ::repositoryIdentity,
         ) { parseRepository(it) }
 
+    override fun listRepositoryLabels(repo: String): List<CnbLabel> =
+        paginate(
+            "/${encodeRepository(repo)}/-/labels",
+            serializer = CnbLabelWire.serializer(),
+            stableIdentity = { "label:${it.id}" },
+            transform = ::parseLabel,
+        )
+
     override fun listBranches(repo: String): List<CnbBranch> {
         val safeRepo = encodeRepository(repo)
         return paginate(

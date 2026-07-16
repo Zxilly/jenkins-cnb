@@ -82,6 +82,8 @@ interface CnbClient : Closeable {
 
     fun listUserRepositories(): List<CnbRepository>
 
+    fun listRepositoryLabels(repo: String): List<CnbLabel>
+
     fun listBranches(repo: String): List<CnbBranch>
 
     fun getBranch(

@@ -602,6 +602,112 @@ class HttpCnbClientTest {
     }
 
     @Test
+    fun `lists repository labels from the repository catalog endpoint`() {
+        handlers["/org/repo/-/labels"] = { exchange ->
+            val body =
+                when (query(exchange.requestURI.rawQuery)["page"]) {
+                    "1" -> {
+                        """[{"id":"label-1","name":"trusted","color":"#00ff00","description":"Trusted contributor","future":true}]"""
+                    }
+
+                    else -> {
+                        "[]"
+                    }
+                }
+            respond(exchange, 200, body)
+        }
+
+        val label = client.listRepositoryLabels("org/repo").single()
+
+        assertEquals("label-1", label.id)
+        assertEquals("trusted", label.name)
+        assertEquals("#00ff00", label.color)
+        assertEquals("Trusted contributor", label.description)
+        assertEquals(2, requests.size)
+        assertTrue(requests.all { it.method == "GET" && it.rawPath == "/org/repo/-/labels" })
+        assertTrue(requests.first().query.contains("page=1"))
+        assertTrue(requests.first().query.contains("page_size=100"))
+    }
+
+    @Test
+    fun `lists repository labels from an items envelope`() {
+        handlers["/org/repo/-/labels"] = { exchange ->
+            val body =
+                if (query(exchange.requestURI.rawQuery)["page"] == "1") {
+                    """{"items":[{"id":"label-1","name":"ready"}],"future":true}"""
+                } else {
+                    "[]"
+                }
+            respond(exchange, 200, body)
+        }
+
+        val labels = client.listRepositoryLabels("org/repo")
+
+        assertEquals(listOf("ready"), labels.map { it.name })
+        assertEquals(2, requests.size)
+    }
+
+    @Test
+    fun `deduplicates repository labels repeated across pagination boundaries`() {
+        handlers["/org/repo/-/labels"] = { exchange ->
+            val body =
+                when (query(exchange.requestURI.rawQuery)["page"]) {
+                    "1" -> """[{"id":"label-1","name":"ready"},{"id":"label-2","name":"security"}]"""
+                    "2" -> """[{"id":"label-2","name":"security-renamed"},{"id":"label-3","name":"release"}]"""
+                    else -> "[]"
+                }
+            respond(exchange, 200, body)
+        }
+
+        val labels = client.listRepositoryLabels("org/repo")
+
+        assertEquals(listOf("label-1", "label-2", "label-3"), labels.map { it.id })
+        assertEquals(listOf("ready", "security", "release"), labels.map { it.name })
+        assertEquals(3, requests.size)
+    }
+
+    @Test
+    fun `rejects malformed repository label catalog responses`() {
+        val malformedResponses =
+            listOf(
+                """[{"id":"","name":"ready"}]""" to "label id",
+                """[{"id":"label-1","name":""}]""" to "label name",
+                """[{"id":"label-1","name":"ready","color":"red"}]""" to "label color",
+                """{"items":"not-an-array"}""" to "invalid JSON",
+            )
+        var response = ""
+        handlers["/org/repo/-/labels"] = { exchange ->
+            respond(
+                exchange,
+                200,
+                if (query(exchange.requestURI.rawQuery)["page"] == "1") response else "[]",
+            )
+        }
+
+        malformedResponses.forEach { (body, expectedMessage) ->
+            response = body
+            val failure = assertThrows(CnbApiException::class.java) { client.listRepositoryLabels("org/repo") }
+
+            assertTrue(failure.message.orEmpty().contains(expectedMessage))
+            requests.clear()
+        }
+    }
+
+    @Test
+    fun `enforces the aggregate response budget for repository labels`() {
+        val padding = "x".repeat(8_500_000)
+        handlers["/org/repo/-/labels"] = { exchange ->
+            val page = query(exchange.requestURI.rawQuery)["page"].orEmpty()
+            respond(exchange, 200, """[{"id":"label-$page","name":"label-$page","padding":"$padding"}]""")
+        }
+
+        val failure = assertThrows(CnbApiException::class.java) { client.listRepositoryLabels("org/repo") }
+
+        assertTrue(failure.message.orEmpty().contains("pagination byte limit"))
+        assertEquals(2, requests.size)
+    }
+
+    @Test
     fun `paginates pull labels and maps unknown fields compatibly`() {
         handlers["/org/repo/-/pulls/7/labels"] = { exchange ->
             val body =
