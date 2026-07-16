@@ -149,7 +149,7 @@ class CnbVerifiedWebhookSchedulingTest {
 
     @Test
     @WithJenkins
-    fun `required live policy data fails the whole classic snapshot closed`(jenkins: JenkinsRule) {
+    fun `unavailable optional policy data fails only the dependent classic job closed`(jenkins: JenkinsRule) {
         val labelledJob = jenkins.createFreeStyleProject("labelled")
         val unlabelledJob = jenkins.createFreeStyleProject("unlabelled")
         val labelled = pullRequestTrigger(requiredLabels = "ready")
@@ -171,7 +171,7 @@ class CnbVerifiedWebhookSchedulingTest {
                 },
             )
 
-        assertEquals(emptyList<CnbVerifiedQueueCandidate>(), denied)
+        assertEquals(listOf(unlabelledJob.fullName), denied.map { candidate -> candidate.job.fullName })
         assertThrows(CnbApiException::class.java) {
             CnbVerifiedWebhookPlanner.classic(
                 pullRequestDelivery(),

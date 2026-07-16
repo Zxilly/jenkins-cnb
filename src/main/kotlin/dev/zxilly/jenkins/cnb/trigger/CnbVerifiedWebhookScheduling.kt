@@ -77,7 +77,7 @@ internal object CnbVerifiedWebhookPlanner {
                 val verified = ArrayList<CnbVerifiedQueueCandidate>(candidates.size)
                 if (directCandidates.isNotEmpty()) {
                     val snapshot = resolve(delivery, directRequirements, client)
-                    if (isCompleteSnapshot(delivery, directRequirements, snapshot)) {
+                    if (snapshot.revisionMatches) {
                         val identity = CnbQueueIdentity.from(delivery)
                         if (identity != null) {
                             for (candidate in directCandidates) {
@@ -107,7 +107,7 @@ internal object CnbVerifiedWebhookPlanner {
                             client,
                         )
                     for (pullRequest in pullRequests) {
-                        if (!isCompleteSnapshot(pullRequest.delivery, targetPushRequirements, pullRequest.snapshot)) continue
+                        if (!pullRequest.snapshot.revisionMatches) continue
                         val identity = CnbQueueIdentity.from(pullRequest.delivery) ?: continue
                         val sourceSha =
                             pullRequest.delivery.payload.pullRequest
@@ -153,20 +153,6 @@ internal object CnbVerifiedWebhookPlanner {
             labels = candidates.any { candidate -> candidate.trigger.labelPolicy().configured },
             commitMessage = candidates.any { candidate -> candidate.trigger.isCiSkip() },
         )
-
-    private fun isCompleteSnapshot(
-        delivery: CnbWebhookDelivery,
-        requirements: CnbLiveDeliveryRequirements,
-        snapshot: CnbLiveDeliverySnapshot,
-    ): Boolean {
-        if (!snapshot.revisionMatches) return false
-        if (requirements.labels && snapshot.labels == null) return false
-        if (requirements.commitMessage && snapshot.commitMessage == null) return false
-        if (requirements.comment && delivery.payload.event == CnbWebhookEvent.PULL_REQUEST_COMMENT) {
-            return snapshot.commentVerified && snapshot.commentBody != null && snapshot.actorAccessLevels != null
-        }
-        return true
-    }
 
     fun targetPushPullRequests(
         delivery: CnbWebhookDelivery,
