@@ -80,3 +80,25 @@ jobs:
           files: target/site/jacoco/jacoco.xml
           disable_search: true
           fail_ci_if_error: false
+
+  build-gate:
+    name: build-gate
+    if: always()
+    needs: [conventional-commit, verify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require successful verification
+        env:
+          CONVENTIONAL_COMMIT_RESULT: ${{ needs.conventional-commit.result }}
+          VERIFY_RESULT: ${{ needs.verify.result }}
+        shell: bash
+        run: |
+          if [[ "$VERIFY_RESULT" != 'success' ]]; then
+            echo "Verification matrix result: $VERIFY_RESULT" >&2
+            exit 1
+          fi
+          if [[ "$CONVENTIONAL_COMMIT_RESULT" != 'success' && "$CONVENTIONAL_COMMIT_RESULT" != 'skipped' ]]; then
+            echo "Conventional Commit validation result: $CONVENTIONAL_COMMIT_RESULT" >&2
+            exit 1
+          fi
