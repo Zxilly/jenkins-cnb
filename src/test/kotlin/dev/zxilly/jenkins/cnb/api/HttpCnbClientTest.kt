@@ -1669,6 +1669,153 @@ class HttpCnbClientTest {
     }
 
     @Test
+    fun `reads commit annotations in one strongly typed batch`() {
+        handlers["/org/repo/-/git/commit-annotations-in-batch"] = { exchange ->
+            respond(
+                exchange,
+                200,
+                """[{"commit_hash":"$shaA","annotations":[{"key":"jenkins_state","value":"success","meta":{"future":true},"future":true}]},{"commit_hash":"$shaB","annotations":[],"future":true}]""",
+            )
+        }
+
+        val batches =
+            client.getCommitAnnotationsInBatch(
+                "org/repo",
+                listOf(shaA, shaB),
+                listOf("jenkins_state"),
+            )
+
+        assertEquals(listOf(shaA, shaB), batches.map { it.commitHash })
+        assertEquals(listOf(CnbCommitAnnotation("jenkins_state", "success")), batches.first().annotations)
+        val request = requests.single()
+        assertEquals("POST", request.method)
+        assertEquals(
+            """{"commit_hashes":["$shaA","$shaB"],"keys":["jenkins_state"]}""",
+            request.body,
+        )
+    }
+
+    @Test
+    fun `preserves duplicate hashes and permissive batch filter keys`() {
+        handlers["/org/repo/-/git/commit-annotations-in-batch"] = { exchange ->
+            respond(
+                exchange,
+                200,
+                """[{"commit_hash":"$shaA","annotations":[]},{"commit_hash":"$shaA","annotations":[]}]""",
+            )
+        }
+
+        val batches =
+            client.getCommitAnnotationsInBatch(
+                "org/repo",
+                listOf(shaA, shaA),
+                listOf("", "unknown"),
+            )
+
+        assertEquals(2, batches.size)
+        assertEquals(
+            """{"commit_hashes":["$shaA","$shaA"],"keys":["","unknown"]}""",
+            requests.single().body,
+        )
+    }
+
+    @Test
+    fun `retries the read only commit annotation batch POST`() {
+        val calls = AtomicInteger()
+        handlers["/org/repo/-/git/commit-annotations-in-batch"] = { exchange ->
+            if (calls.incrementAndGet() == 1) {
+                respond(exchange, 503, """{"errcode":503,"errmsg":"temporary"}""")
+            } else {
+                respond(exchange, 200, "[]")
+            }
+        }
+
+        assertTrue(client.getCommitAnnotationsInBatch("org/repo", listOf(shaA)).isEmpty())
+        assertEquals(2, calls.get())
+    }
+
+    @Test
+    fun `validates commit annotation batch limits before sending`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            client.getCommitAnnotationsInBatch("org/repo", emptyList())
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            client.getCommitAnnotationsInBatch("org/repo", List(21) { shaA })
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            client.getCommitAnnotationsInBatch("org/repo", listOf("abc123"))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            client.getCommitAnnotationsInBatch("org/repo", listOf(shaA), List(6) { "key-$it" })
+        }
+
+        assertTrue(requests.isEmpty())
+    }
+
+    @Test
+    fun `rejects an unrequested commit from an annotation batch response`() {
+        handlers["/org/repo/-/git/commit-annotations-in-batch"] = { exchange ->
+            respond(
+                exchange,
+                200,
+                """[{"commit_hash":"$shaB","annotations":[]}]""",
+            )
+        }
+
+        assertThrows(CnbApiException::class.java) {
+            client.getCommitAnnotationsInBatch("org/repo", listOf(shaA))
+        }
+    }
+
+    @Test
+    fun `allows an annotation batch response to omit an unknown commit`() {
+        handlers["/org/repo/-/git/commit-annotations-in-batch"] = { exchange ->
+            respond(
+                exchange,
+                200,
+                """[{"commit_hash":"$shaA","annotations":[]}]""",
+            )
+        }
+
+        val batches = client.getCommitAnnotationsInBatch("org/repo", listOf(shaA, shaB))
+
+        assertEquals(listOf(shaA), batches.map { it.commitHash })
+    }
+
+    @Test
+    fun `bounds a commit annotation batch before JSON materialization`() {
+        handlers["/org/repo/-/git/commit-annotations-in-batch"] = { exchange ->
+            respond(
+                exchange,
+                200,
+                """[{"commit_hash":"$shaA","annotations":[{"key":"large","value":"${"x".repeat(4 * 1024 * 1024)}"}]}]""",
+            )
+        }
+
+        val failure =
+            assertThrows(CnbApiException::class.java) {
+                client.getCommitAnnotationsInBatch("org/repo", listOf(shaA))
+            }
+
+        assertTrue(failure.message.orEmpty().contains("response exceeded"))
+    }
+
+    @Test
+    fun `bounds a commit annotation batch error before retry policy`() {
+        handlers["/org/repo/-/git/commit-annotations-in-batch"] = { exchange ->
+            respond(exchange, 503, "x".repeat(4 * 1024 * 1024 + 1))
+        }
+
+        val failure =
+            assertThrows(CnbApiException::class.java) {
+                client.getCommitAnnotationsInBatch("org/repo", listOf(shaA))
+            }
+
+        assertTrue(failure.message.orEmpty().contains("response exceeded"))
+        assertEquals(1, requests.size)
+    }
+
+    @Test
     fun `rejects commit annotations missing required wire fields`() {
         handlers["/org/repo/-/git/commit-annotations/abc123"] = { exchange ->
             respond(exchange, 200, """[{"value":"missing-key"}]""")

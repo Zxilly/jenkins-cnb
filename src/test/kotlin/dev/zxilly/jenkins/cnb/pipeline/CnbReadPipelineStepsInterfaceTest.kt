@@ -22,6 +22,7 @@ class CnbReadPipelineStepsInterfaceTest {
                 "cnbCommit",
                 "cnbCommits",
                 "cnbCompareCommits",
+                "cnbCommitAnnotations",
                 "cnbPullRequestCommits",
                 "cnbPullRequestFiles",
                 "cnbPullRequestStatuses",
@@ -38,6 +39,9 @@ class CnbReadPipelineStepsInterfaceTest {
                     !it.takesImplicitBlockArgument()
             },
         )
+        val helpRoot = "dev/zxilly/jenkins/cnb/pipeline/CnbCommitAnnotationsStep"
+        assertTrue(javaClass.classLoader.getResource("$helpRoot/help-commitHashes.html") != null)
+        assertTrue(javaClass.classLoader.getResource("$helpRoot/help-keys.html") != null)
     }
 
     @Test

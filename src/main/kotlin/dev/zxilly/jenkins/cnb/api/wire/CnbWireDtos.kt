@@ -411,6 +411,20 @@ internal data class CnbAnnotationWire(
 )
 
 @Serializable
+internal data class CnbCommitAnnotationsBatchRequestWire(
+    @SerialName("commit_hashes")
+    val commitHashes: List<String>,
+    val keys: List<String> = emptyList(),
+)
+
+@Serializable
+internal data class CnbCommitAnnotationsBatchEntryWire(
+    @SerialName("commit_hash")
+    val commitHash: String,
+    val annotations: List<CnbAnnotationWire> = emptyList(),
+)
+
+@Serializable
 internal data class CnbTagAnnotationMetadataWire(
     val operator: String = "",
     @SerialName("updated_at")

@@ -5,6 +5,8 @@ import dev.zxilly.jenkins.cnb.api.model.CnbBuildHistory
 import dev.zxilly.jenkins.cnb.api.model.CnbBuildInfo
 import dev.zxilly.jenkins.cnb.api.model.CnbBuildPipeline
 import dev.zxilly.jenkins.cnb.api.model.CnbCommit
+import dev.zxilly.jenkins.cnb.api.model.CnbCommitAnnotation
+import dev.zxilly.jenkins.cnb.api.model.CnbCommitAnnotations
 import dev.zxilly.jenkins.cnb.api.model.CnbCommitComparison
 import dev.zxilly.jenkins.cnb.api.model.CnbCommitDiffFile
 import dev.zxilly.jenkins.cnb.api.model.CnbCommitPerson
@@ -103,6 +105,35 @@ class CnbCompareCommitsStep
             override fun getFunctionName(): String = "cnbCompareCommits"
 
             override fun getDisplayName(): String = "Compare CNB commits"
+        }
+    }
+
+/** Reads annotations for up to 20 full CNB commit hashes in one request. */
+class CnbCommitAnnotationsStep
+    @DataBoundConstructor
+    constructor(
+        commitHashes: List<String>,
+    ) : CnbContextAwareStep() {
+        val commitHashes: List<String> = CnbCommitAnnotationBatchInput.commitHashes(commitHashes)
+        var keys: List<String> = emptyList()
+            private set
+
+        @DataBoundSetter fun setKeys(value: List<String>?) {
+            keys = CnbCommitAnnotationBatchInput.keys(value.orEmpty())
+        }
+
+        override fun start(context: StepContext): StepExecution =
+            execution(
+                CnbStepRequest.CommitAnnotations(ArrayList(commitHashes), ArrayList(keys)),
+                context,
+            )
+
+        @Extension
+        @Symbol("cnbCommitAnnotations")
+        class DescriptorImpl : CnbApiStepDescriptor() {
+            override fun getFunctionName(): String = "cnbCommitAnnotations"
+
+            override fun getDisplayName(): String = "Read CNB commit annotations in batch"
         }
     }
 
@@ -282,6 +313,25 @@ internal object CnbReadInput {
     }
 }
 
+internal object CnbCommitAnnotationBatchInput {
+    private const val MAX_HASHES = 20
+    private const val MAX_KEYS = 5
+    private val FULL_SHA1 = Regex("[0-9A-Fa-f]{40}")
+
+    fun commitHashes(values: List<String>): List<String> {
+        require(values.size in 1..MAX_HASHES) { "CNB commit annotation batch must contain between 1 and $MAX_HASHES hashes" }
+        require(values.all(FULL_SHA1::matches)) {
+            "CNB commit annotation batch hashes must contain exactly 40 hexadecimal characters"
+        }
+        return ArrayList(values)
+    }
+
+    fun keys(values: List<String>): List<String> {
+        require(values.size <= MAX_KEYS) { "CNB commit annotation batch must contain at most $MAX_KEYS keys" }
+        return ArrayList(values)
+    }
+}
+
 /** Converts every read-only domain result into types safely persisted by Pipeline CPS. */
 internal object CnbReadPipelineValues {
     fun commit(value: CnbCommit): LinkedHashMap<String, Any?> =
@@ -310,6 +360,21 @@ internal object CnbReadPipelineValues {
                 },
             "totalCommits" to value.totalCommits,
         )
+
+    fun commitAnnotations(values: List<CnbCommitAnnotations>): ArrayList<LinkedHashMap<String, Any?>> =
+        ArrayList<LinkedHashMap<String, Any?>>().apply {
+            values.forEach { value ->
+                add(
+                    mapOfValues(
+                        "commitHash" to value.commitHash,
+                        "annotations" to
+                            ArrayList<LinkedHashMap<String, Any?>>().apply {
+                                value.annotations.forEach { add(commitAnnotation(it)) }
+                            },
+                    ),
+                )
+            }
+        }
 
     fun pullFiles(values: List<CnbPullFile>): ArrayList<LinkedHashMap<String, Any?>> =
         ArrayList<LinkedHashMap<String, Any?>>().apply {
@@ -384,6 +449,12 @@ internal object CnbReadPipelineValues {
             "targetUrl" to value.targetUrl,
             "createdAt" to value.createdAt,
             "updatedAt" to value.updatedAt,
+        )
+
+    private fun commitAnnotation(value: CnbCommitAnnotation): LinkedHashMap<String, Any?> =
+        mapOfValues(
+            "key" to value.key,
+            "value" to value.value,
         )
 
     private fun review(value: CnbPullReview): LinkedHashMap<String, Any?> =

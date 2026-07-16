@@ -463,6 +463,11 @@ data class CnbCommitAnnotation(
     val value: String,
 ) : Serializable
 
+data class CnbCommitAnnotations(
+    val commitHash: String,
+    val annotations: List<CnbCommitAnnotation> = arrayListOf(),
+) : Serializable
+
 data class CnbTagAnnotation(
     val key: String,
     val value: String,

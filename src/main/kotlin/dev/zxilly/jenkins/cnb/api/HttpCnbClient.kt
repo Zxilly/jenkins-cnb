@@ -17,6 +17,7 @@ import dev.zxilly.jenkins.cnb.api.model.CnbBuildState
 import dev.zxilly.jenkins.cnb.api.model.CnbBuildStatus
 import dev.zxilly.jenkins.cnb.api.model.CnbCommit
 import dev.zxilly.jenkins.cnb.api.model.CnbCommitAnnotation
+import dev.zxilly.jenkins.cnb.api.model.CnbCommitAnnotations
 import dev.zxilly.jenkins.cnb.api.model.CnbCommitComparison
 import dev.zxilly.jenkins.cnb.api.model.CnbCommitDiffFile
 import dev.zxilly.jenkins.cnb.api.model.CnbCommitDiffStatus
@@ -91,6 +92,8 @@ import dev.zxilly.jenkins.cnb.api.wire.CnbBuildResultWire
 import dev.zxilly.jenkins.cnb.api.wire.CnbBuildStageWire
 import dev.zxilly.jenkins.cnb.api.wire.CnbBuildStatusWire
 import dev.zxilly.jenkins.cnb.api.wire.CnbCommentRequestWire
+import dev.zxilly.jenkins.cnb.api.wire.CnbCommitAnnotationsBatchEntryWire
+import dev.zxilly.jenkins.cnb.api.wire.CnbCommitAnnotationsBatchRequestWire
 import dev.zxilly.jenkins.cnb.api.wire.CnbCommitComparisonWire
 import dev.zxilly.jenkins.cnb.api.wire.CnbCommitDiffFileWire
 import dev.zxilly.jenkins.cnb.api.wire.CnbCommitStatusWire
@@ -1026,6 +1029,69 @@ internal class HttpCnbClient(
 
     @SuppressFBWarnings(
         value = ["BC_BAD_CAST_TO_ABSTRACT_COLLECTION"],
+        justification = "Kotlin's inline collection mapping allocates concrete ArrayLists that SpotBugs loses in SMAP bytecode.",
+    )
+    override fun getCommitAnnotationsInBatch(
+        repo: String,
+        commitHashes: List<String>,
+        keys: List<String>,
+    ): List<CnbCommitAnnotations> {
+        require(commitHashes.size in 1..MAX_COMMIT_ANNOTATION_BATCH_HASHES) {
+            "CNB commit annotation batch must contain between 1 and $MAX_COMMIT_ANNOTATION_BATCH_HASHES hashes"
+        }
+        require(commitHashes.all(COMMIT_ANNOTATION_BATCH_HASH::matches)) {
+            "CNB commit annotation batch hashes must contain exactly 40 hexadecimal characters"
+        }
+        require(keys.size <= MAX_COMMIT_ANNOTATION_BATCH_KEYS) {
+            "CNB commit annotation batch must contain at most $MAX_COMMIT_ANNOTATION_BATCH_KEYS keys"
+        }
+        val request = CnbCommitAnnotationsBatchRequestWire(ArrayList(commitHashes), ArrayList(keys))
+        val wires =
+            requestBoundedJson(
+                "POST",
+                "/${encodeRepository(repo)}/-/git/commit-annotations-in-batch",
+                ListSerializer(CnbCommitAnnotationsBatchEntryWire.serializer()),
+                MAX_COMMIT_ANNOTATION_BATCH_RESPONSE_BYTES,
+                body = encodeRequest(CnbCommitAnnotationsBatchRequestWire.serializer(), request),
+                idempotent = true,
+            ) ?: throw CnbApiException("CNB commit annotations batch response was empty")
+        val remainingHashes =
+            commitHashes
+                .map(CnbGitObjectId::canonical)
+                .groupingBy { it }
+                .eachCount()
+                .toMutableMap()
+        return wires.map { entry ->
+            val commitHash = requireWireObjectId(entry.commitHash, "commit annotation batch hash")
+            val remaining = remainingHashes[commitHash] ?: 0
+            if (remaining < 1) {
+                throw CnbApiException("CNB commit annotations batch returned an unrequested commit")
+            }
+            if (remaining == 1) remainingHashes.remove(commitHash) else remainingHashes[commitHash] = remaining - 1
+            CnbCommitAnnotations(
+                commitHash = commitHash,
+                annotations =
+                    entry.annotations.map { annotation ->
+                        CnbCommitAnnotation(
+                            boundedRequiredWireText(
+                                annotation.key,
+                                "commit annotation key",
+                                MAX_ANNOTATION_KEY_LENGTH,
+                            ),
+                            boundedWireText(
+                                annotation.value,
+                                "commit annotation value",
+                                MAX_ANNOTATION_VALUE_LENGTH,
+                                allowLineBreaks = true,
+                            ),
+                        )
+                    },
+            )
+        }
+    }
+
+    @SuppressFBWarnings(
+        value = ["BC_BAD_CAST_TO_ABSTRACT_COLLECTION"],
         justification = "Kotlin's inline collection mapping allocates a concrete ArrayList that SpotBugs loses in SMAP bytecode.",
     )
     override fun putCommitAnnotations(
@@ -1598,6 +1664,37 @@ internal class HttpCnbClient(
             }
         }
 
+    private fun <T> requestBoundedJson(
+        method: String,
+        path: String,
+        serializer: DeserializationStrategy<T>,
+        maxResponseBytes: Int,
+        query: Map<String, String> = emptyMap(),
+        body: CnbEncodedJsonBody? = null,
+        idempotent: Boolean = method == "GET",
+    ): T? {
+        val bytes =
+            requestValue(
+                method = method,
+                path = path,
+                query = query,
+                body = body,
+                idempotent = idempotent,
+                acceptNotFound = false,
+            ) { response ->
+                if (
+                    response.statusCode == 204 || response.statusCode == 205 ||
+                    response.headers.allValues("Content-Length") == listOf("0")
+                ) {
+                    ByteArray(0)
+                } else {
+                    response.readBoundedBytes(maxResponseBytes)
+                }
+            } ?: return null
+        if (bytes.isEmpty()) return null
+        return CnbJsonCodec.decode(serializer, bytes, "response for $path")
+    }
+
     private fun <T> requestJsonArrayOrItems(
         method: String,
         path: String,
@@ -1663,7 +1760,7 @@ internal class HttpCnbClient(
                             if (context.statusCode in 200..299) {
                                 ApiResponseBody.Success(successReader.read(context))
                             } else {
-                                ApiResponseBody.Error(context.readBytes())
+                                ApiResponseBody.Error(context.readBoundedBytes(MAX_ERROR_RESPONSE_BYTES))
                             }
                         }
                     if (response.statusCode == 404 && acceptNotFound) {
@@ -1955,7 +2052,7 @@ internal class HttpCnbClient(
                 val length = response.streamTo(maxBytes, declaredLength, target::openStream)
                 TransferBody.Streamed(length)
             } else {
-                TransferBody.Buffered(response.readBoundedBytes(MAX_TRANSFER_ERROR_BYTES))
+                TransferBody.Buffered(response.readBoundedBytes(MAX_ERROR_RESPONSE_BYTES))
             }
         }
     }
@@ -3584,7 +3681,7 @@ internal class HttpCnbClient(
         private const val PERMIT_WAIT_SECONDS = 5L
         private const val MAX_ATTEMPTS = 4
         private const val MAX_RAW_RESPONSE_BYTES = 4 * 1024 * 1024
-        private const val MAX_TRANSFER_ERROR_BYTES = 4 * 1024 * 1024
+        private const val MAX_ERROR_RESPONSE_BYTES = 4 * 1024 * 1024
         private const val MAX_RAW_REFERENCE_LENGTH = 1_024
         private const val MAX_CONTENT_TYPE_LENGTH = 256
         private const val MAX_COMMENT_LENGTH = 60_000
@@ -3653,7 +3750,11 @@ internal class HttpCnbClient(
         private const val MAX_ANNOTATIONS = 100
         private const val MAX_ANNOTATION_KEY_LENGTH = 256
         private const val MAX_ANNOTATION_VALUE_LENGTH = 16_384
+        private const val MAX_COMMIT_ANNOTATION_BATCH_HASHES = 20
+        private const val MAX_COMMIT_ANNOTATION_BATCH_KEYS = 5
+        private const val MAX_COMMIT_ANNOTATION_BATCH_RESPONSE_BYTES = 4 * 1024 * 1024
         private val ANNOTATION_KEY_PATTERN = Regex("[A-Za-z0-9_-]+")
+        private val COMMIT_ANNOTATION_BATCH_HASH = Regex("[0-9A-Fa-f]{40}")
         private const val BASE_BACKOFF_MILLIS = 500L
         private const val MAX_BACKOFF_MILLIS = 10_000L
         private const val MAX_RETRY_AFTER_SECONDS = 60L

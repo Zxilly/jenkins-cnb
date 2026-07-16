@@ -551,6 +551,11 @@ internal sealed interface CnbStepRequest : Serializable {
         val head: String,
     ) : CnbStepRequest
 
+    data class CommitAnnotations(
+        val commitHashes: List<String>,
+        val keys: List<String>,
+    ) : CnbStepRequest
+
     data class ReviewPullRequest(
         val action: CnbPullReviewEvent,
         val body: String,
@@ -730,6 +735,12 @@ internal object CnbStepDispatcher {
             is CnbStepRequest.CompareCommits -> {
                 CnbReadPipelineValues.comparison(
                     client.compareCommits(context.repository, request.base, request.head),
+                )
+            }
+
+            is CnbStepRequest.CommitAnnotations -> {
+                CnbReadPipelineValues.commitAnnotations(
+                    client.getCommitAnnotationsInBatch(context.repository, request.commitHashes, request.keys),
                 )
             }
 

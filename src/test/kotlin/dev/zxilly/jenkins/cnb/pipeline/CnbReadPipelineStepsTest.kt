@@ -9,6 +9,8 @@ import dev.zxilly.jenkins.cnb.api.model.CnbBuildInfo
 import dev.zxilly.jenkins.cnb.api.model.CnbBuildPipeline
 import dev.zxilly.jenkins.cnb.api.model.CnbBuildState
 import dev.zxilly.jenkins.cnb.api.model.CnbCommit
+import dev.zxilly.jenkins.cnb.api.model.CnbCommitAnnotation
+import dev.zxilly.jenkins.cnb.api.model.CnbCommitAnnotations
 import dev.zxilly.jenkins.cnb.api.model.CnbCommitComparison
 import dev.zxilly.jenkins.cnb.api.model.CnbCommitDiffFile
 import dev.zxilly.jenkins.cnb.api.model.CnbCommitDiffStatus
@@ -26,6 +28,10 @@ import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assertions.fail
 import org.junit.jupiter.api.Test
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.ObjectInputStream
+import java.io.ObjectOutputStream
 import java.lang.reflect.Proxy
 import java.util.LinkedHashMap
 
@@ -80,6 +86,75 @@ class CnbReadPipelineStepsTest {
         assertEquals("alice", ((one as Map<*, *>)["author"] as Map<*, *>)["username"])
         assertEquals("abc1234", query?.sha)
         assertEquals("src/App.kt", (((comparison as Map<*, *>)["files"] as List<*>).single() as Map<*, *>)["path"])
+    }
+
+    @Test
+    fun `commit annotation batch preserves order in CPS safe values`() {
+        val shaA = requireNotNull(context.sha)
+        val shaB = "b".repeat(40)
+        var requestedHashes: List<String>? = null
+        var requestedKeys: List<String>? = null
+        val client =
+            client(
+                mapOf(
+                    "getCommitAnnotationsInBatch" to { args ->
+                        requestedHashes = args?.get(1) as List<String>
+                        requestedKeys = args[2] as List<String>
+                        listOf(
+                            CnbCommitAnnotations(
+                                shaB,
+                                listOf(CnbCommitAnnotation("jenkins_state", "success")),
+                            ),
+                            CnbCommitAnnotations(shaA, emptyList()),
+                        )
+                    },
+                ),
+            )
+
+        val result =
+            CnbStepDispatcher.execute(
+                CnbStepRequest.CommitAnnotations(
+                    listOf(shaB, shaA),
+                    listOf("jenkins_state"),
+                ),
+                context,
+                client,
+            ) as List<*>
+
+        assertEquals(listOf(shaB, shaA), requestedHashes)
+        assertEquals(listOf("jenkins_state"), requestedKeys)
+        assertEquals(shaB, (result.first() as Map<*, *>)["commitHash"])
+        assertEquals(
+            "success",
+            ((((result.first() as Map<*, *>)["annotations"] as List<*>).single()) as Map<*, *>)["value"],
+        )
+        assertCpsSafe(result)
+    }
+
+    @Test
+    fun `commit annotation batch request survives persistence and mutable inputs`() {
+        val hashes = arrayListOf("a".repeat(40))
+        val keys = arrayListOf("jenkins_state")
+        val step = CnbCommitAnnotationsStep(hashes)
+        step.setKeys(keys)
+        hashes.clear()
+        keys.clear()
+
+        assertEquals(1, step.commitHashes.size)
+        assertEquals(listOf("jenkins_state"), step.keys)
+
+        val request = CnbStepRequest.CommitAnnotations(ArrayList(step.commitHashes), ArrayList(step.keys))
+        val serialized =
+            ByteArrayOutputStream().use { bytes ->
+                ObjectOutputStream(bytes).use { it.writeObject(request) }
+                bytes.toByteArray()
+            }
+        val restored =
+            ObjectInputStream(ByteArrayInputStream(serialized)).use {
+                it.readObject() as CnbStepRequest.CommitAnnotations
+            }
+
+        assertEquals(request, restored)
     }
 
     @Test
@@ -253,6 +328,12 @@ class CnbReadPipelineStepsTest {
         assertThrows(IllegalArgumentException::class.java) { CnbCommitStep(" ") }
         assertThrows(IllegalArgumentException::class.java) { CnbCompareCommitsStep("master", "\u0001") }
         assertThrows(IllegalArgumentException::class.java) { CnbCommitStep("x".repeat(1_025)) }
+        assertThrows(IllegalArgumentException::class.java) { CnbCommitAnnotationsStep(emptyList()) }
+        assertThrows(IllegalArgumentException::class.java) { CnbCommitAnnotationsStep(listOf("abc123")) }
+        assertThrows(IllegalArgumentException::class.java) { CnbCommitAnnotationsStep(List(21) { "a".repeat(40) }) }
+        val annotations = CnbCommitAnnotationsStep(listOf("a".repeat(40), "a".repeat(40)))
+        assertThrows(IllegalArgumentException::class.java) { annotations.setKeys(List(6) { "key-$it" }) }
+        annotations.setKeys(listOf("", "unknown"))
         val commits = CnbCommitsStep()
         assertThrows(IllegalArgumentException::class.java) { commits.setAuthor("x".repeat(1_025)) }
         val history = CnbBuildHistoryStep()
@@ -263,6 +344,7 @@ class CnbReadPipelineStepsTest {
                 CnbCommitStep.DescriptorImpl(),
                 CnbCommitsStep.DescriptorImpl(),
                 CnbCompareCommitsStep.DescriptorImpl(),
+                CnbCommitAnnotationsStep.DescriptorImpl(),
                 CnbPullRequestCommitsStep.DescriptorImpl(),
                 CnbPullRequestFilesStep.DescriptorImpl(),
                 CnbPullRequestStatusesStep.DescriptorImpl(),
@@ -274,6 +356,7 @@ class CnbReadPipelineStepsTest {
                 "cnbCommit",
                 "cnbCommits",
                 "cnbCompareCommits",
+                "cnbCommitAnnotations",
                 "cnbPullRequestCommits",
                 "cnbPullRequestFiles",
                 "cnbPullRequestStatuses",

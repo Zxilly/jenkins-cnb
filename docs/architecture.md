@@ -118,6 +118,10 @@ annotation 使用 context 与哈希派生的 `jenkins_..._` key。CNB key 仅允
 不执行跨生产者 read-modify-write。每个 Pipeline context 拥有独立持久化 action；queued、running、
 final、retry 和 Controller restart 统一走幂等 reconciliation。
 
+批量 Commit annotation 查询使用 CNB 的只读 POST；请求体相同的 429/5xx 可安全重试。CNB 的 20 个 SHA、
+5 个过滤 key 和 40 位 SHA 约束在 Pipeline 与 HTTP 两层校验。Ktor 普通 JSON 转换会先物化完整响应，
+因此该端点在 `kotlinx.serialization` 解码前以 4 MiB 字节预算读取，避免异常响应耗尽 Controller 堆。
+
 ## Release Asset 传输
 
 Release metadata 与文件内容分离。列表和详情进入强类型领域模型；CNB 返回的上传票据和下载 URL

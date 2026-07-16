@@ -105,7 +105,7 @@ gh attestation verify cnb.hpi --repo Zxilly/jenkins-cnb
    已包含的 `repo-pr:r`。启用成员信任或 PR 评论触发时增加 `repo-manage:r`，用于实时查询目标仓库
    成员权限；
 3. 结果上报：PR 评论需要 `repo-notes:rw`；Commit annotations 需要 `repo-code:rw`，Tag
-   annotations 需要 `repo-release:rw`；
+   annotations 需要 `repo-release:rw`；批量只读 Commit annotations 至少需要 `repo-code:r`；
 4. 显式 PR 写操作：创建、更新、指派、Reviewer、标签和合并需要 `repo-pr:rw`，评论、评审、
    review comment 回复需要 `repo-notes:rw`；
 5. Release：查询需要 `repo-release:r`，创建、更新、删除及 Asset 上传/删除需要
@@ -243,7 +243,9 @@ CNB_PULL_REQUEST_ACTION
   CNB Token；
 - `cnbBuildMetadata`：写入/更新 Jenkins 构建元数据；
 - `cnbCommitStatuses`：只读查询 CNB 原生 Commit Status；
-- `cnbCommit`、`cnbCommits`、`cnbCompareCommits`：查询提交、历史和差异。
+- `cnbCommit`、`cnbCommits`、`cnbCompareCommits`：查询提交、历史和差异；
+- `cnbCommitAnnotations`：以 `commitHashes` 批量查询 1 到 20 个完整 SHA，可选最多 5 个 `keys`，
+  返回 `[{commitHash, annotations: [{key, value}]}]`。
 
 PR symbols：
 

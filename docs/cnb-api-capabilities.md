@@ -73,6 +73,7 @@ fail closed。
 | 原生 Commit Status 读取 | Commit/PR status GET | Pipeline 只读查询，返回受控状态枚举 |
 | 原生 Commit Status 写入 | 无 POST/PUT/PATCH | **不支持，也不会用 Badge 伪装** |
 | Commit annotations | GET/PUT/DELETE | 写入符合 CNB 字符约束的独立 `jenkins_..._` key；不覆盖其他生产者 |
+| Commit annotations 批量读取 | POST `commit-annotations-in-batch` | `cnbCommitAnnotations` 强类型只读步骤；1..20 个 40 位 SHA、最多 5 个过滤 key |
 | Tag annotations | GET/PUT/DELETE | Tag 构建写 Tag metadata，不污染 Commit key |
 | CNB Build 启动 | `POST /build/start` | 仅显式 step，事件只接受 `api_trigger*`，避免递归 |
 | Build 状态 | `GET /build/status/{sn}` | 有界单次查询；中断会传播到 Jenkins |

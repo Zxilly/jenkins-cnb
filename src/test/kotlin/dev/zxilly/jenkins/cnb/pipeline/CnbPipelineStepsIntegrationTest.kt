@@ -123,6 +123,19 @@ class CnbPipelineStepsIntegrationTest {
                     respond(exchange, 200, """[{"context":"ci/jenkins","state":"success"}]""")
                 }
 
+                "/team/project/-/git/commit-annotations-in-batch" -> {
+                    assertEquals("POST", exchange.requestMethod)
+                    assertEquals(
+                        """{"commit_hashes":["${"a".repeat(40)}"],"keys":["jenkins_state"]}""",
+                        exchange.requestBody.readAllBytes().toString(StandardCharsets.UTF_8),
+                    )
+                    respond(
+                        exchange,
+                        200,
+                        """[{"commit_hash":"${"a".repeat(40)}","annotations":[{"key":"jenkins_state","value":"success"}]}]""",
+                    )
+                }
+
                 "/team/project/-/build/start" -> {
                     assertEquals("POST", exchange.requestMethod)
                     respond(exchange, 201, """{"sn":"cnb-123","buildLogUrl":"https://cnb.cool/build/123","success":true}""")
@@ -172,6 +185,12 @@ class CnbPipelineStepsIntegrationTest {
                       serverId: 'local-cnb', repository: 'team/project', sha: '${"a".repeat(40)}'
                     )
                     if (statuses.size() != 1 || statuses[0].context != 'ci/jenkins') { error('unexpected statuses') }
+                    def annotations = cnbCommitAnnotations(
+                      serverId: 'local-cnb', repository: 'team/project',
+                      commitHashes: ['${"a".repeat(40)}'], keys: ['jenkins_state']
+                    )
+                    if (annotations[0].commitHash != '${"a".repeat(40)}' ||
+                        annotations[0].annotations[0].value != 'success') { error('unexpected annotations') }
                     if (!cnbReviewPullRequest(
                       serverId: 'local-cnb', repository: 'team/project', pullRequestNumber: '42',
                       sha: '${"a".repeat(40)}', action: 'comment', body: 'pipeline review',
@@ -196,7 +215,7 @@ class CnbPipelineStepsIntegrationTest {
                 )
 
             jenkins.buildAndAssertSuccess(job)
-            assertEquals(14, requests.size)
+            assertEquals(15, requests.size)
             assertEquals(4, requests.count { it == "GET /team/project/-/pulls/42" })
         } finally {
             server.stop(0)

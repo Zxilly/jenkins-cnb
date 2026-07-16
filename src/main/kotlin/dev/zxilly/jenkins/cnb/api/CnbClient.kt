@@ -12,6 +12,7 @@ import dev.zxilly.jenkins.cnb.api.model.CnbBuildStage
 import dev.zxilly.jenkins.cnb.api.model.CnbBuildStatus
 import dev.zxilly.jenkins.cnb.api.model.CnbCommit
 import dev.zxilly.jenkins.cnb.api.model.CnbCommitAnnotation
+import dev.zxilly.jenkins.cnb.api.model.CnbCommitAnnotations
 import dev.zxilly.jenkins.cnb.api.model.CnbCommitComparison
 import dev.zxilly.jenkins.cnb.api.model.CnbCommitQuery
 import dev.zxilly.jenkins.cnb.api.model.CnbCommitStatus
@@ -303,6 +304,12 @@ interface CnbClient : Closeable {
         repo: String,
         sha: String,
     ): List<CnbCommitAnnotation>
+
+    fun getCommitAnnotationsInBatch(
+        repo: String,
+        commitHashes: List<String>,
+        keys: List<String> = emptyList(),
+    ): List<CnbCommitAnnotations>
 
     fun putCommitAnnotations(
         repo: String,
