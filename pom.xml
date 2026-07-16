@@ -392,7 +392,7 @@
                 <annotationProcessorPath>
                   <groupId>org.kohsuke.stapler</groupId>
                   <artifactId>stapler</artifactId>
-                  <version>2088.v915606dc8e86</version>
+                  <version>2098.vb_b_6e4c15415b_</version>
                 </annotationProcessorPath>
                 <annotationProcessorPath>
                   <groupId>org.jenkins-ci</groupId>
