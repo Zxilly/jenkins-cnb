@@ -634,6 +634,7 @@ enum class CnbBuildState(
     val wireValue: String,
 ) {
     PENDING("pending"),
+    PREPARE("prepare"),
     START("start"),
     RUNNING("running"),
     SUCCESS("success"),

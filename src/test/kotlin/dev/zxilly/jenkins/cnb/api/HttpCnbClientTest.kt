@@ -1334,7 +1334,7 @@ class HttpCnbClientTest {
             respond(
                 exchange,
                 200,
-                """{"status":"running","pipelinesStatus":{"pipeline-1":{"id":"pipeline-1","name":"Jenkins smoke","status":"running","duration":12,"metricCoreHours":1.25,"metricDuration":4500.5,"labels":[{"key":"runner","value":["linux",8,16]}],"stages":[{"id":"stage-1","name":"test","status":"success","duration":10}],"future":true}},"future":true}""",
+                """{"status":"running","pipelinesStatus":{"pipeline-1":{"id":"pipeline-1","name":"Jenkins smoke","status":"prepare","duration":12,"metricCoreHours":1.25,"metricDuration":4500.5,"labels":[{"key":"runner","value":["linux",8,16]}],"stages":[{"id":"stage-1","name":"test","status":"success","duration":10}],"future":true}},"future":true}""",
             )
         }
         handlers["/org/repo/-/build/stop/cnb-start"] = { exchange ->
@@ -1367,6 +1367,7 @@ class HttpCnbClientTest {
         assertTrue(requests.first().body.contains("\"sync\":\"true\""))
         assertTrue(requests.first().body.contains("\"workMode\":true"))
         assertEquals(CnbBuildState.RUNNING, status.status)
+        assertEquals(CnbBuildState.PREPARE, status.pipelinesStatus.getValue("pipeline-1").status)
         assertEquals(
             listOf("linux", "8", "16"),
             status.pipelinesStatus
