@@ -37,5 +37,3 @@ unclassified:
         connectTimeoutSeconds: 5
         requestTimeoutSeconds: 20
         statusReportingMode: "PULL_REQUEST_COMMENT"
-        automaticBuildBadgeEnabled: true
-        automaticBuildBadgeKey: "ci/jenkins"

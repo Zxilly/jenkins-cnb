@@ -20,7 +20,7 @@ internal data class CnbBuildMetadataReportResult(
     val commentId: String?,
 )
 
-/** Writes CNB build badges, commit annotations, and one durable PR comment. Native commit statuses are not used. */
+/** Writes CNB commit annotations and one durable PR comment. Native commit statuses are not used. */
 internal object CnbBuildMetadataReporter {
     private const val CONTEXT_SLUG_LENGTH = 72
     private val commentLocks = Array(64) { ReentrantLock() }
@@ -32,8 +32,7 @@ internal object CnbBuildMetadataReporter {
         val target = snapshot.target
         val server = CnbGlobalConfiguration.get().findServer(target.serverId)
         val mode = server.statusReportingMode ?: CnbStatusReportingMode.BOTH
-        val badgeKey = server.automaticBuildBadgeKey?.takeIf { server.automaticBuildBadgeEnabled }
-        if (mode == CnbStatusReportingMode.DISABLED && badgeKey == null) {
+        if (mode == CnbStatusReportingMode.DISABLED) {
             return CnbBuildMetadataReportResult(snapshot.knownCommentId)
         }
         val credentialsId =
@@ -42,7 +41,7 @@ internal object CnbBuildMetadataReporter {
                 ?: server.credentialsId?.takeIf(String::isNotBlank)
 
         CnbClientFactory.create(target.serverId, credentialsId, item).use { client ->
-            return reportWithClient(snapshot, client, mode, badgeKey)
+            return reportWithClient(snapshot, client, mode)
         }
     }
 
@@ -55,7 +54,6 @@ internal object CnbBuildMetadataReporter {
         snapshot: CnbBuildMetadataSnapshot,
         client: CnbClient,
         mode: CnbStatusReportingMode,
-        badgeKey: String? = null,
     ): CnbBuildMetadataReportResult {
         var commentId = snapshot.knownCommentId
         val failures = mutableListOf<Exception>()
@@ -65,13 +63,6 @@ internal object CnbBuildMetadataReporter {
             } else {
                 client.capabilities.supportsTagAnnotations
             }
-        if (badgeKey != null) {
-            try {
-                updateBuildBadge(client, snapshot, badgeKey)
-            } catch (failure: Exception) {
-                failures += failure
-            }
-        }
         if (mode.reportsAnnotations() && supportsTargetAnnotations) {
             try {
                 updateAnnotations(client, snapshot)
@@ -97,6 +88,9 @@ internal object CnbBuildMetadataReporter {
         return CnbBuildMetadataReportResult(commentId)
     }
 
+    // TODO: Reconnect this to lifecycle reporting when CNB supports a dedicated generic badge key.
+    // The current upload API only accepts security/tca, which Jenkins must not overwrite.
+    @Suppress("unused")
     private fun updateBuildBadge(
         client: CnbClient,
         snapshot: CnbBuildMetadataSnapshot,

@@ -38,5 +38,3 @@ unclassified:
         connectTimeoutSeconds: 10
         requestTimeoutSeconds: 30
         statusReportingMode: "BOTH"
-        automaticBuildBadgeEnabled: true
-        automaticBuildBadgeKey: "security/tca"

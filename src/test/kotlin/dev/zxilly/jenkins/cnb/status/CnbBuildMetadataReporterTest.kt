@@ -3,8 +3,6 @@ package dev.zxilly.jenkins.cnb.status
 import dev.zxilly.jenkins.cnb.api.CnbApiException
 import dev.zxilly.jenkins.cnb.api.CnbClient
 import dev.zxilly.jenkins.cnb.api.model.CnbApiCapabilities
-import dev.zxilly.jenkins.cnb.api.model.CnbBadgeUploadRequest
-import dev.zxilly.jenkins.cnb.api.model.CnbBadgeUploadResult
 import dev.zxilly.jenkins.cnb.api.model.CnbCommitAnnotation
 import dev.zxilly.jenkins.cnb.api.model.CnbPullComment
 import dev.zxilly.jenkins.cnb.api.model.CnbTagAnnotation
@@ -177,47 +175,6 @@ class CnbBuildMetadataReporterTest {
     }
 
     @Test
-    fun `automatic badge reports lifecycle state against the repository that owns the commit`() {
-        val recording = RecordingClient()
-
-        CnbBuildMetadataReporter.reportWithClient(
-            snapshot(state = CnbBuildMetadataState.RUNNING),
-            recording.client(),
-            CnbStatusReportingMode.DISABLED,
-            "security/tca",
-        )
-
-        assertEquals("contributor/repo", recording.badgeRepository)
-        assertEquals(
-            CnbBadgeUploadRequest(
-                key = "security/tca",
-                sha = "a".repeat(40),
-                message = "running",
-                link = "https://jenkins.example/job/folder/job/42/",
-                latest = true,
-            ),
-            recording.badgeRequest,
-        )
-        assertEquals(1, recording.badgeCalls)
-        assertEquals(0, recording.annotationCalls)
-        assertEquals(0, recording.listCalls)
-    }
-
-    @Test
-    fun `automatic badge omits a relative Jenkins link`() {
-        val recording = RecordingClient()
-
-        CnbBuildMetadataReporter.reportWithClient(
-            snapshot(buildUrl = "job/folder/job/42/"),
-            recording.client(),
-            CnbStatusReportingMode.DISABLED,
-            "security/tca",
-        )
-
-        assertEquals("", requireNotNull(recording.badgeRequest).link)
-    }
-
-    @Test
     fun `all independent destinations are attempted and a retryable failure wins`() {
         val annotationFailure = IllegalStateException("annotation rejected")
         val retryable = CnbApiException("temporarily unavailable", 503, retryable = true)
@@ -234,27 +191,6 @@ class CnbBuildMetadataReporterTest {
         assertSame(retryable, thrown)
         assertEquals(1, recording.annotationCalls)
         assertEquals(1, recording.listCalls)
-    }
-
-    @Test
-    fun `badge failure is propagated after independent destinations are attempted`() {
-        val badgeFailure = CnbApiException("badge temporarily unavailable", 503, retryable = true)
-        val recording = RecordingClient(failures = mapOf("uploadBadge" to badgeFailure))
-
-        val thrown =
-            assertThrows(CnbApiException::class.java) {
-                CnbBuildMetadataReporter.reportWithClient(
-                    snapshot(),
-                    recording.client(),
-                    CnbStatusReportingMode.BOTH,
-                    "security/tca",
-                )
-            }
-
-        assertSame(badgeFailure, thrown)
-        assertEquals(1, recording.badgeCalls)
-        assertEquals(1, recording.annotationCalls)
-        assertEquals("created-1", recording.createdCommentId)
     }
 
     @Test
@@ -332,12 +268,8 @@ class CnbBuildMetadataReporterTest {
         var updatedCommentId: String? = null
         var annotationCalls = 0
         var listCalls = 0
-        var badgeCalls = 0
-        var badgeRepository: String? = null
-        var badgeRequest: CnbBadgeUploadRequest? = null
-
         val called: Boolean
-            get() = badgeCalls > 0 || annotationCalls > 0 || listCalls > 0 || createdBody != null || updatedBody != null
+            get() = annotationCalls > 0 || listCalls > 0 || createdBody != null || updatedBody != null
 
         @Suppress("UNCHECKED_CAST")
         fun client(): CnbClient {
@@ -352,17 +284,6 @@ class CnbBuildMetadataReporterTest {
             return object : CnbClient by unsupported {
                 override val capabilities: CnbApiCapabilities
                     get() = this@RecordingClient.capabilities
-
-                override fun uploadBadge(
-                    repo: String,
-                    request: CnbBadgeUploadRequest,
-                ): CnbBadgeUploadResult {
-                    badgeCalls++
-                    badgeRepository = repo
-                    badgeRequest = request
-                    failures["uploadBadge"]?.let { throw it }
-                    return CnbBadgeUploadResult("https://cnb.cool/$repo/-/badge/git/aaaaaaaa/${request.key}")
-                }
 
                 override fun putCommitAnnotations(
                     repo: String,
