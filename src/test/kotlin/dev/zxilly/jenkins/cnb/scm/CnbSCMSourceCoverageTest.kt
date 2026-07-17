@@ -264,7 +264,9 @@ class CnbSCMSourceCoverageTest {
     fun `source actions expose repository branch pull request and tag metadata`() {
         val fixture = Fixture()
         val source = TestSource { fixture.client() }
-        val repositoryAction = source.sourceActions().single() as ObjectMetadataAction
+        val repositoryActions = source.sourceActions()
+        val repositoryAction = repositoryActions.filterIsInstance<ObjectMetadataAction>().single()
+        val repositoryAvatar = repositoryActions.filterIsInstance<CnbAvatarMetadataAction>().single()
         val defaultBranch = source.headActions(CnbBranchSCMHead("main"))
         val featureBranch = source.headActions(CnbBranchSCMHead("feature/a+b"))
         val pullRequest =
@@ -275,6 +277,8 @@ class CnbSCMSourceCoverageTest {
 
         assertEquals("repo", repositoryAction.objectDisplayName)
         assertEquals("https://cnb.cool/team/repo", repositoryAction.objectUrl)
+        assertEquals("https://cnb.cool/team/-/logos/s", repositoryAvatar.avatarUrl)
+        assertEquals("CNB repository namespace avatar", repositoryAvatar.avatarDescription)
         assertTrue(defaultBranch.any { it is PrimaryInstanceMetadataAction })
         assertEquals(
             "https://cnb.cool/team/repo/-/tree/feature%2Fa%2Bb",

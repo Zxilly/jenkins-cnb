@@ -104,9 +104,13 @@ class CnbSCMNavigatorCoverageTest {
         assertTrue(fixture.listCalls.isEmpty())
         assertEquals("cnb-cool::*", navigator.navigatorId())
         assertEquals(2, observer.projects.size)
-        val action = navigator.fetchActions(folder, null, TaskListener.NULL).single() as ObjectMetadataAction
+        val actions = navigator.fetchActions(folder, null, TaskListener.NULL)
+        val action = actions.filterIsInstance<ObjectMetadataAction>().single()
+        val avatar = actions.filterIsInstance<CnbAvatarMetadataAction>().single()
         assertEquals("Accessible repositories", action.objectDisplayName)
         assertEquals("https://cnb.cool", action.objectUrl)
+        assertEquals("https://cnb.cool/images/favicon.svg", avatar.avatarUrl)
+        assertEquals("CNB instance avatar", avatar.avatarDescription)
     }
 
     @Test
@@ -116,7 +120,9 @@ class CnbSCMNavigatorCoverageTest {
         val descriptor = CnbSCMNavigator.DescriptorImpl()
         val navigator = descriptor.newInstance("team") as CnbSCMNavigator
         val folder = jenkins.jenkins.createProject(OrganizationFolder::class.java, "owner")
-        val action = navigator.fetchActions(folder, null, TaskListener.NULL).single() as ObjectMetadataAction
+        val actions = navigator.fetchActions(folder, null, TaskListener.NULL)
+        val action = actions.filterIsInstance<ObjectMetadataAction>().single()
+        val avatar = actions.filterIsInstance<CnbAvatarMetadataAction>().single()
 
         assertEquals("CNB namespace", descriptor.displayName)
         assertEquals("Namespace", descriptor.pronoun)
@@ -125,6 +131,8 @@ class CnbSCMNavigatorCoverageTest {
         assertEquals("primary", navigator.serverId)
         assertEquals("team", action.objectDisplayName)
         assertEquals("https://cnb.cool/team", action.objectUrl)
+        assertEquals("https://cnb.cool/team/-/logos/s", avatar.avatarUrl)
+        assertEquals("CNB namespace avatar", avatar.avatarDescription)
         assertEquals(listOf("primary", "legacy"), descriptor.doFillServerIdItems("legacy").map { it.value })
         assertEquals(FormValidation.Kind.OK, descriptor.doCheckServerId(null, "primary").kind)
         assertEquals(FormValidation.Kind.ERROR, descriptor.doCheckServerId(null, "missing").kind)
