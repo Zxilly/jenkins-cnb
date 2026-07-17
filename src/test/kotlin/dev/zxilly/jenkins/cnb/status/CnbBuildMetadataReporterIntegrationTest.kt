@@ -94,7 +94,7 @@ class CnbBuildMetadataReporterIntegrationTest {
             respond(
                 exchange,
                 200,
-                """{"url":"$base/git/aaaaaaaa/security/tca","latest_url":"$base/git/latest/security/tca"}""",
+                """{"url":"$base/git/aaaaaaaa/security/tca","latest":"$base/git/latest/security/tca"}""",
             )
         }
         http.start()

@@ -154,7 +154,7 @@ class CnbPipelineStepsIntegrationTest {
                         200,
                         """{"url":"/team/project/-/badge/git/${"a".repeat(
                             40,
-                        )}/security/tca","latest_url":"/team/project/-/badge/git/latest/security/tca"}""",
+                        )}/security/tca","latest":"/team/project/-/badge/git/latest/security/tca"}""",
                     )
                 }
 

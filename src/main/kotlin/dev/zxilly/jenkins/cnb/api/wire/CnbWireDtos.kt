@@ -348,7 +348,7 @@ internal data class CnbBadgeUploadRequestWire(
 
 @Serializable
 internal data class CnbBadgeUploadResultWire(
-    @SerialName("latest_url")
+    @SerialName("latest")
     val latestUrl: String = "",
     val url: String = "",
 )
