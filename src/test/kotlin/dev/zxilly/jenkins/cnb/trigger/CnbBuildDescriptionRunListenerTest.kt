@@ -60,8 +60,6 @@ class CnbBuildDescriptionRunListenerTest {
         CnbWebhookDelivery(
             "primary",
             CnbWebhookPayload(
-                schema = CnbWebhookPayload.SCHEMA_V1,
-                installationId = "primary",
                 deliveryId = "description-delivery",
                 buildId = "build-1",
                 occurredAt = Instant.EPOCH,

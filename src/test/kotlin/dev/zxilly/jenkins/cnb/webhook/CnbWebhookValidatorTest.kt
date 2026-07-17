@@ -30,9 +30,9 @@ class CnbWebhookValidatorTest {
     }
 
     @Test
-    fun `rejects payloads for a different installation or CNB API origin`() {
+    fun `rejects a mismatched server route or CNB API origin`() {
         assertThrows(CnbWebhookValidationException::class.java) {
-            CnbWebhookValidator.validate("cnb-cool", server, payload().copy(installationId = "other"), now)
+            CnbWebhookValidator.validate("other", server, payload(), now)
         }
         assertThrows(CnbWebhookValidationException::class.java) {
             CnbWebhookValidator.validate(
@@ -268,8 +268,6 @@ class CnbWebhookValidatorTest {
 
     private fun payload() =
         CnbWebhookPayload(
-            schema = CnbWebhookPayload.SCHEMA_V1,
-            installationId = "cnb-cool",
             deliveryId = "pipeline-1",
             buildId = "build-1",
             occurredAt = Instant.parse("2026-07-15T10:00:00Z"),

@@ -164,7 +164,7 @@ class CnbPushTriggerTest {
     }
 
     @Test
-    fun `configured pull request events apply ref source target and WIP filters`() {
+    fun `configured pull request events apply ref source and target filters before API verification`() {
         val trigger = CnbPushTrigger("cnb-cool", "team/project", "main")
         trigger.setEventFilter("pull_request.comment pull_request.update")
         trigger.setSourceBranchFilter("feature/**")
@@ -177,9 +177,6 @@ class CnbPushTriggerTest {
         assertFalse(trigger.matches(pullRequestDelivery(CnbWebhookEvent.PULL_REQUEST_TARGET)))
         assertFalse(trigger.matches(pullRequestDelivery(CnbWebhookEvent.PULL_REQUEST_COMMENT, sourceBranch = "fix/nope")))
         assertFalse(trigger.matches(pullRequestDelivery(CnbWebhookEvent.PULL_REQUEST_COMMENT, targetBranch = "release")))
-        assertFalse(trigger.matches(pullRequestDelivery(CnbWebhookEvent.PULL_REQUEST_COMMENT, wip = true)))
-
-        trigger.setIncludeDraftPullRequests(true)
         assertTrue(trigger.matches(pullRequestDelivery(CnbWebhookEvent.PULL_REQUEST_COMMENT, wip = true)))
         assertEquals("pull_request.update,pull_request.comment", trigger.getEventFilter())
 
@@ -244,6 +241,10 @@ class CnbPushTriggerTest {
 
         assertTrue(snapshot.revisionMatches)
         assertTrue(accepted.matchesLive(delivery, snapshot))
+        val draftSnapshot = snapshot.copy(pullRequest = snapshot.pullRequest?.copy(draft = true))
+        assertFalse(accepted.matchesLive(delivery, draftSnapshot))
+        accepted.setIncludeDraftPullRequests(true)
+        assertTrue(accepted.matchesLive(delivery, draftSnapshot))
 
         val rejected = CnbPushTrigger("cnb-cool", "team/project", "main")
         rejected.setEventFilter("pull_request.comment")
@@ -578,7 +579,7 @@ class CnbPushTriggerTest {
                 getPullRequest = { _, number -> livePullRequest(number).copy(state = CnbPullRequestState.MERGED) },
             ),
         )
-        assertFalse(
+        assertTrue(
             CnbPushTrigger.revisionMatches(
                 delivery,
                 getBranch = { _, _ -> error("Branch lookup must not be used") },
@@ -596,8 +597,6 @@ class CnbPushTriggerTest {
     ): CnbWebhookDelivery {
         val payload =
             CnbWebhookPayload(
-                CnbWebhookPayload.SCHEMA_V1,
-                "cnb-cool",
                 "delivery-1",
                 "build-1",
                 Instant.parse("2026-07-15T10:00:00Z"),
@@ -638,8 +637,6 @@ class CnbPushTriggerTest {
             )
         val payload =
             CnbWebhookPayload(
-                CnbWebhookPayload.SCHEMA_V1,
-                "cnb-cool",
                 "delivery-pr-7",
                 "build-pr-7",
                 Instant.parse("2026-07-15T10:00:00Z"),
