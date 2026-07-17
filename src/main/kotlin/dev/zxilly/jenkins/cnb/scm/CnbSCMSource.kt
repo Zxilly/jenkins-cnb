@@ -534,7 +534,10 @@ open class CnbSCMSource
         ): List<Action> =
             client().use { client ->
                 val repository = remember(client.getRepository(repositoryPath))
-                listOf(ObjectMetadataAction(repository.name, null, repository.webUrl))
+                listOf(
+                    ObjectMetadataAction(repository.name, null, repository.webUrl),
+                    CnbAvatarMetadataAction.forRepository(repository.webUrl),
+                )
             }
 
         override fun retrieveActions(

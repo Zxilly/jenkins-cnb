@@ -186,10 +186,16 @@ open class CnbSCMNavigator
         ): List<Action> {
             val server = CnbGlobalConfiguration.get().findServer(serverId)
             if (discoverAllRepositories) {
-                return listOf(ObjectMetadataAction("Accessible repositories", null, server.webUrl))
+                return listOf(
+                    ObjectMetadataAction("Accessible repositories", null, server.webUrl),
+                    CnbAvatarMetadataAction.forInstance(server.webUrl),
+                )
             }
             val namespaceUrl = "${server.webUrl.trimEnd('/')}/${namespace.trim('/')}"
-            return listOf(ObjectMetadataAction(namespace.substringAfterLast('/'), null, namespaceUrl))
+            return listOf(
+                ObjectMetadataAction(namespace.substringAfterLast('/'), null, namespaceUrl),
+                CnbAvatarMetadataAction.forNamespace(server.webUrl, namespace),
+            )
         }
 
         private fun projectName(repositoryPath: String): String = projectNameFor(repositoryPath)
