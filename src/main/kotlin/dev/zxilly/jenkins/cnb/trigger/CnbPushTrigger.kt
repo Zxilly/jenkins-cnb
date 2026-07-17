@@ -215,7 +215,7 @@ class CnbPushTrigger
             if (!CnbRefGlob.matches(getRefFilter(), payload.ref.name)) return false
             val pullRequest = payload.pullRequest
             if (payload.event.pullRequestEvent) {
-                if (pullRequest == null || (pullRequest.wip && !isIncludeDraftPullRequests())) return false
+                if (pullRequest == null) return false
                 if (payload.event == CnbWebhookEvent.PULL_REQUEST_COMMENT && commentPolicy() == null) return false
                 if (!CnbRefGlob.matches(getSourceBranchFilter(), pullRequest.sourceBranch)) return false
                 if (!CnbRefGlob.matches(getTargetBranchFilter(), pullRequest.targetBranch)) return false
@@ -265,6 +265,7 @@ class CnbPushTrigger
                 }
             }
             if (!delivery.payload.event.pullRequestEvent) return true
+            if (snapshot.pullRequest?.draft == true && !isIncludeDraftPullRequests()) return false
             if (!labelPolicy().matches(snapshot.labels)) return false
             if (delivery.payload.event != CnbWebhookEvent.PULL_REQUEST_COMMENT) return true
             val policy = commentPolicy() ?: return false
@@ -713,8 +714,7 @@ class CnbPushTrigger
                     current.sourceRepo != advertised.sourceRepository ||
                     current.sourceBranch != advertised.sourceBranch ||
                     !current.sourceSha.equals(advertised.sourceSha, ignoreCase = true) ||
-                    current.targetBranch != advertised.targetBranch ||
-                    current.draft != advertised.wip
+                    current.targetBranch != advertised.targetBranch
                 ) {
                     return false
                 }

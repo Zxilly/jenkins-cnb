@@ -79,7 +79,7 @@ class CnbPushCause private constructor(
                     "CNB_PULL_REQUEST_TARGET_BRANCH" to pullRequest?.targetBranch.orEmpty(),
                     "CNB_PULL_REQUEST_MERGE_SHA" to pullRequest?.mergeSha.orEmpty(),
                     "CNB_PULL_REQUEST_ACTION" to pullRequest?.action.orEmpty(),
-                    "CNB_PULL_REQUEST_IS_WIP" to pullRequest?.wip?.toString().orEmpty(),
+                    "CNB_PULL_REQUEST_IS_WIP" to (pullRequest?.wip?.toString() ?: ""),
                     "CNB_PULL_REQUEST_REVIEWERS" to pullRequest?.reviewers.orEmpty(),
                     "CNB_PULL_REQUEST_REVIEW_STATE" to pullRequest?.reviewState.orEmpty(),
                     "CNB_REVIEW_REVIEWED_BY" to pullRequest?.reviewedBy.orEmpty(),

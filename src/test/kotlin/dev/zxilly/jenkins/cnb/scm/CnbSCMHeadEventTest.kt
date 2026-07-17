@@ -576,8 +576,6 @@ class CnbSCMHeadEventTest {
         pullRequest: CnbWebhookPullRequest? = null,
     ): CnbWebhookPayload =
         CnbWebhookPayload(
-            schema = CnbWebhookPayload.SCHEMA_V1,
-            installationId = "cnb-cool",
             deliveryId = "delivery-1",
             buildId = "build-1",
             occurredAt = Instant.EPOCH,

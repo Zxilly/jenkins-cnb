@@ -601,8 +601,6 @@ class CnbVerifiedWebhookSchedulingTest {
 
     private fun basePayload(event: CnbWebhookEvent): CnbWebhookPayload =
         CnbWebhookPayload(
-            schema = CnbWebhookPayload.SCHEMA_V1,
-            installationId = "primary",
             deliveryId = "delivery-1",
             buildId = "build-1",
             occurredAt = Instant.EPOCH,

@@ -209,18 +209,24 @@ class CnbWebhookProcessorTest {
     ): ByteArray =
         """
         {
-          "schema":"dev.zxilly.jenkins.cnb.webhook.v1",
-          "installation_id":"cnb-cool",
-          "delivery_id":"$delivery",
-          "build_id":"build-1",
-          "occurred_at":"$NOW",
-          "event":"push",
-          "event_url":"https://cnb.cool/$repository",
-          "is_retry":false,
-          "instance":{"web_url":"https://cnb.cool","api_url":"https://api.cnb.cool"},
-          "repository":{"id":"repo-1","slug":"$repository","url":"https://cnb.cool/$repository"},
-          "actor":{"id":"user-1","username":"alice"},
-          "ref":{"name":"main","sha":"${"a".repeat(40)}","before":"${"b".repeat(40)}","commit":"${"a".repeat(40)}","is_tag":false}
+          "CNB_WEB_ENDPOINT":"https://cnb.cool",
+          "CNB_API_ENDPOINT":"https://api.cnb.cool",
+          "CNB_EVENT":"push",
+          "CNB_EVENT_URL":"https://cnb.cool/$repository",
+          "CNB_BRANCH":"main",
+          "CNB_BRANCH_SHA":"${"a".repeat(40)}",
+          "CNB_BEFORE_SHA":"${"b".repeat(40)}",
+          "CNB_COMMIT":"${"a".repeat(40)}",
+          "CNB_IS_TAG":"false",
+          "CNB_REPO_SLUG":"$repository",
+          "CNB_REPO_ID":"repo-1",
+          "CNB_REPO_URL_HTTPS":"https://cnb.cool/$repository",
+          "CNB_BUILD_ID":"build-1",
+          "CNB_BUILD_START_TIME":"$NOW",
+          "CNB_BUILD_USER":"alice",
+          "CNB_BUILD_USER_ID":"user-1",
+          "CNB_PIPELINE_ID":"$delivery",
+          "CNB_IS_RETRY":"false"
         }
         """.trimIndent().toByteArray(StandardCharsets.UTF_8)
 

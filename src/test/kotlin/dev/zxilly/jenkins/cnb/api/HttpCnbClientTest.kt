@@ -259,7 +259,7 @@ class HttpCnbClientTest {
             respond(
                 exchange,
                 200,
-                """{"url":"/team/project/-/badge/git/$shaA/security/tca","latest_url":"/team/project/-/badge/git/latest/security/tca"}""",
+                """{"url":"/team/project/-/badge/git/$shaA/security/tca","latest":"/team/project/-/badge/git/latest/security/tca"}""",
             )
         }
 

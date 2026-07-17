@@ -1,18 +1,7 @@
 package dev.zxilly.jenkins.cnb.webhook
 
-import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialName
-import kotlinx.serialization.SerializationException
-import kotlinx.serialization.builtins.serializer
-import kotlinx.serialization.descriptors.PrimitiveKind
-import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
-import kotlinx.serialization.descriptors.SerialDescriptor
-import kotlinx.serialization.encoding.Decoder
-import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonDecoder
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.booleanOrNull
 import java.io.Serializable
 import java.nio.charset.StandardCharsets
 import java.time.Instant
@@ -45,8 +34,6 @@ enum class CnbWebhookEvent(
 }
 
 data class CnbWebhookPayload(
-    val schema: String,
-    val installationId: String,
     val deliveryId: String,
     val buildId: String,
     val occurredAt: Instant,
@@ -58,12 +45,9 @@ data class CnbWebhookPayload(
     val actor: CnbWebhookActor,
     val ref: CnbWebhookRef,
     val pullRequest: CnbWebhookPullRequest?,
-    val encoding: String = "",
 ) : Serializable {
     companion object {
         private const val serialVersionUID = 1L
-        const val SCHEMA_V1 = "dev.zxilly.jenkins.cnb.webhook.v1"
-        const val CNBCOOL_WEBHOOK_V1_0_2_JSON_FRAGMENT = "cnbcool.webhook.v1.0.2-json-fragment"
     }
 }
 
@@ -110,7 +94,7 @@ data class CnbWebhookPullRequest(
     val targetSha: String,
     val mergeSha: String?,
     val action: String,
-    val wip: Boolean,
+    val wip: Boolean?,
     val reviewers: String = "",
     val reviewState: String = "",
     val reviewedBy: String = "",
@@ -139,316 +123,147 @@ internal object CnbWebhookPayloadParser {
 
     fun parse(rawBody: ByteArray): CnbWebhookPayload =
         try {
-            val wire =
-                json.decodeFromString(
+            json
+                .decodeFromString(
                     CnbWebhookPayloadWire.serializer(),
                     rawBody.toString(StandardCharsets.UTF_8),
-                )
-            when (wire.encoding.orEmpty()) {
-                "" -> wire
-                CnbWebhookPayload.CNBCOOL_WEBHOOK_V1_0_2_JSON_FRAGMENT -> wire.decodeFragments(::decodeFragment)
-                else -> throw CnbWebhookFormatException("Unsupported webhook payload encoding")
-            }.toDomain()
+                ).toDomain()
         } catch (failure: CnbWebhookFormatException) {
             throw failure
         } catch (_: Exception) {
-            throw CnbWebhookFormatException("Malformed JSON payload")
+            throw CnbWebhookFormatException("Malformed CNB webhook JSON payload")
         }
 
     fun parseOccurredAt(value: String): Instant =
         runCatching { Instant.parse(value) }
             .recoverCatching { OffsetDateTime.parse(value).toInstant() }
-            .getOrElse { throw CnbWebhookFormatException("occurred_at must be an ISO-8601 timestamp") }
-
-    private fun decodeFragment(value: String): String =
-        try {
-            json.decodeFromString(String.serializer(), "\"$value\"")
-        } catch (_: Exception) {
-            throw CnbWebhookFormatException("Malformed encoded webhook string")
-        }
+            .getOrElse { throw CnbWebhookFormatException("CNB_BUILD_START_TIME must be an ISO-8601 timestamp") }
 }
 
 @KotlinSerializable
 private data class CnbWebhookPayloadWire(
-    val schema: String,
-    val encoding: String? = null,
-    @SerialName("installation_id") val installationId: String,
-    @SerialName("delivery_id") val deliveryId: String,
-    @SerialName("build_id") val buildId: String? = null,
-    @SerialName("occurred_at") val occurredAt: String,
-    val event: String,
-    @SerialName("event_url") val eventUrl: String? = null,
-    @KotlinSerializable(with = CnbBooleanWireSerializer::class)
-    @SerialName("is_retry")
-    val retry: Boolean = false,
-    val instance: CnbWebhookInstanceWire,
-    val repository: CnbWebhookRepositoryWire,
-    val actor: CnbWebhookActorWire? = null,
-    val ref: CnbWebhookRefWire,
-    @SerialName("pull_request") val pullRequest: CnbWebhookPullRequestWire? = null,
+    @SerialName("CNB_WEB_ENDPOINT") val webUrl: String? = null,
+    @SerialName("CNB_API_ENDPOINT") val apiUrl: String? = null,
+    @SerialName("CNB_EVENT") val event: String? = null,
+    @SerialName("CNB_EVENT_URL") val eventUrl: String? = null,
+    @SerialName("CNB_BRANCH") val branch: String? = null,
+    @SerialName("CNB_BRANCH_SHA") val branchSha: String? = null,
+    @SerialName("CNB_BEFORE_SHA") val beforeSha: String? = null,
+    @SerialName("CNB_COMMIT") val commit: String? = null,
+    @SerialName("CNB_NEW_COMMITS_COUNT") val newCommitsCount: String? = null,
+    @SerialName("CNB_IS_TAG") val isTag: String? = null,
+    @SerialName("CNB_REPO_SLUG") val repositorySlug: String? = null,
+    @SerialName("CNB_REPO_ID") val repositoryId: String? = null,
+    @SerialName("CNB_REPO_URL_HTTPS") val repositoryUrl: String? = null,
+    @SerialName("CNB_BUILD_ID") val buildId: String? = null,
+    @SerialName("CNB_BUILD_START_TIME") val buildStartTime: String? = null,
+    @SerialName("CNB_BUILD_USER") val buildUser: String? = null,
+    @SerialName("CNB_BUILD_USER_ID") val buildUserId: String? = null,
+    @SerialName("CNB_BUILD_USER_NICKNAME") val buildUserNickname: String? = null,
+    @SerialName("CNB_BUILD_USER_EMAIL") val buildUserEmail: String? = null,
+    @SerialName("CNB_PIPELINE_ID") val pipelineId: String? = null,
+    @SerialName("CNB_IS_RETRY") val isRetry: String? = null,
+    @SerialName("CNB_PULL_REQUEST_ID") val pullRequestId: String? = null,
+    @SerialName("CNB_PULL_REQUEST_IID") val pullRequestNumber: String? = null,
+    @SerialName("CNB_PULL_REQUEST_TITLE") val pullRequestTitle: String? = null,
+    @SerialName("CNB_PULL_REQUEST_DESCRIPTION") val pullRequestDescription: String? = null,
+    @SerialName("CNB_PULL_REQUEST_PROPOSER") val pullRequestProposer: String? = null,
+    @SerialName("CNB_PULL_REQUEST_SLUG") val pullRequestSlug: String? = null,
+    @SerialName("CNB_PULL_REQUEST_BRANCH") val pullRequestBranch: String? = null,
+    @SerialName("CNB_PULL_REQUEST_SHA") val pullRequestSha: String? = null,
+    @SerialName("CNB_PULL_REQUEST_TARGET_SHA") val pullRequestTargetSha: String? = null,
+    @SerialName("CNB_PULL_REQUEST_MERGE_SHA") val pullRequestMergeSha: String? = null,
+    @SerialName("CNB_PULL_REQUEST_ACTION") val pullRequestAction: String? = null,
+    @SerialName("CNB_PULL_REQUEST_IS_WIP") val pullRequestIsWip: String? = null,
+    @SerialName("CNB_PULL_REQUEST_REVIEWERS") val pullRequestReviewers: String? = null,
+    @SerialName("CNB_PULL_REQUEST_REVIEW_STATE") val pullRequestReviewState: String? = null,
+    @SerialName("CNB_REVIEW_REVIEWED_BY") val reviewedBy: String? = null,
+    @SerialName("CNB_REVIEW_LAST_REVIEWED_BY") val lastReviewedBy: String? = null,
+    @SerialName("CNB_COMMENT_ID") val commentId: String? = null,
+    @SerialName("CNB_COMMENT_BODY") val commentBody: String? = null,
+    @SerialName("CNB_COMMENT_TYPE") val commentType: String? = null,
+    @SerialName("CNB_COMMENT_FILE_PATH") val commentFilePath: String? = null,
+    @SerialName("CNB_COMMENT_RANGE") val commentRange: String? = null,
+    @SerialName("CNB_REVIEW_ID") val reviewId: String? = null,
+    @SerialName("CNB_REVIEW_DESCRIPTION") val reviewDescription: String? = null,
 ) {
     fun toDomain(): CnbWebhookPayload {
         val domainEvent =
-            CnbWebhookEvent.fromWireName(event.required("event"))
+            CnbWebhookEvent.fromWireName(event.required("CNB_EVENT"))
                 ?: throw CnbWebhookFormatException("Unsupported or untrusted CNB event")
-        val domainPullRequest =
-            when {
-                domainEvent.pullRequestEvent -> {
-                    pullRequest?.toDomain()
-                        ?: throw CnbWebhookFormatException("Pull request event is missing pull_request")
-                }
-
-                pullRequest == null || pullRequest.number.isNullOrBlank() -> {
-                    null
-                }
-
-                else -> {
-                    throw CnbWebhookFormatException("Non-pull-request event must not include pull_request")
-                }
+        val targetBranch = branch.required("CNB_BRANCH")
+        val pullRequest =
+            if (domainEvent.pullRequestEvent) {
+                CnbWebhookPullRequest(
+                    id = pullRequestId.required("CNB_PULL_REQUEST_ID"),
+                    number = pullRequestNumber.required("CNB_PULL_REQUEST_IID"),
+                    title = pullRequestTitle.orEmpty(),
+                    description = pullRequestDescription.orEmpty(),
+                    proposer = pullRequestProposer.orEmpty(),
+                    sourceRepository = pullRequestSlug.required("CNB_PULL_REQUEST_SLUG"),
+                    sourceBranch = pullRequestBranch.required("CNB_PULL_REQUEST_BRANCH"),
+                    sourceSha = pullRequestSha.required("CNB_PULL_REQUEST_SHA"),
+                    targetBranch = targetBranch,
+                    targetSha = pullRequestTargetSha.required("CNB_PULL_REQUEST_TARGET_SHA"),
+                    mergeSha = pullRequestMergeSha?.takeIf(String::isNotBlank),
+                    action = pullRequestAction.orEmpty(),
+                    wip = pullRequestIsWip.optionalBoolean("CNB_PULL_REQUEST_IS_WIP"),
+                    reviewers = pullRequestReviewers.orEmpty(),
+                    reviewState = pullRequestReviewState.orEmpty(),
+                    reviewedBy = reviewedBy.orEmpty(),
+                    lastReviewedBy = lastReviewedBy.orEmpty(),
+                    commentId = commentId.orEmpty(),
+                    commentBody = commentBody.orEmpty(),
+                    commentType = commentType.orEmpty(),
+                    commentFilePath = commentFilePath.orEmpty(),
+                    commentRange = commentRange.orEmpty(),
+                    reviewId = reviewId.orEmpty(),
+                    reviewDescription = reviewDescription.orEmpty(),
+                )
+            } else {
+                null
             }
         return CnbWebhookPayload(
-            schema = schema.required("schema"),
-            installationId = installationId.required("installation_id"),
-            deliveryId = deliveryId.required("delivery_id"),
+            deliveryId = pipelineId.required("CNB_PIPELINE_ID"),
             buildId = buildId.orEmpty(),
-            occurredAt = CnbWebhookPayloadParser.parseOccurredAt(occurredAt.required("occurred_at")),
+            occurredAt = CnbWebhookPayloadParser.parseOccurredAt(buildStartTime.required("CNB_BUILD_START_TIME")),
             event = domainEvent,
             eventUrl = eventUrl.orEmpty(),
-            retry = retry,
-            instance = instance.toDomain(),
-            repository = repository.toDomain(),
-            actor = actor?.toDomain() ?: CnbWebhookActor("", "", "", ""),
-            ref = ref.toDomain(),
-            pullRequest = domainPullRequest,
-            encoding = encoding.orEmpty(),
+            retry = isRetry.booleanOrDefault("CNB_IS_RETRY", false),
+            instance = CnbWebhookInstance(webUrl.required("CNB_WEB_ENDPOINT"), apiUrl.required("CNB_API_ENDPOINT")),
+            repository =
+                CnbWebhookRepository(
+                    repositoryId.required("CNB_REPO_ID"),
+                    repositorySlug.required("CNB_REPO_SLUG"),
+                    repositoryUrl.required("CNB_REPO_URL_HTTPS"),
+                ),
+            actor = CnbWebhookActor(buildUserId.orEmpty(), buildUser.orEmpty(), buildUserNickname.orEmpty(), buildUserEmail.orEmpty()),
+            ref =
+                CnbWebhookRef(
+                    name = targetBranch,
+                    sha = branchSha.orEmpty(),
+                    before = beforeSha.orEmpty(),
+                    commit = commit.orEmpty(),
+                    tag = isTag.booleanOrDefault("CNB_IS_TAG", false),
+                    newCommitsCount = newCommitsCount.orEmpty(),
+                ),
+            pullRequest = pullRequest,
         )
     }
-}
-
-@KotlinSerializable
-private data class CnbWebhookInstanceWire(
-    @SerialName("web_url") val webUrl: String,
-    @SerialName("api_url") val apiUrl: String,
-) {
-    fun toDomain(): CnbWebhookInstance = CnbWebhookInstance(webUrl.required("web_url"), apiUrl.required("api_url"))
-}
-
-@KotlinSerializable
-private data class CnbWebhookRepositoryWire(
-    val id: String,
-    val slug: String,
-    val url: String,
-) {
-    fun toDomain(): CnbWebhookRepository = CnbWebhookRepository(id.required("id"), slug.required("slug"), url.required("url"))
-}
-
-@KotlinSerializable
-private data class CnbWebhookActorWire(
-    val id: String? = null,
-    val username: String? = null,
-    val nickname: String? = null,
-    val email: String? = null,
-) {
-    fun toDomain(): CnbWebhookActor = CnbWebhookActor(id.orEmpty(), username.orEmpty(), nickname.orEmpty(), email.orEmpty())
-}
-
-@KotlinSerializable
-private data class CnbWebhookRefWire(
-    val name: String,
-    val sha: String? = null,
-    val before: String? = null,
-    val commit: String? = null,
-    @KotlinSerializable(with = CnbBooleanWireSerializer::class)
-    @SerialName("is_tag")
-    val tag: Boolean = false,
-    @SerialName("new_commits_count")
-    val newCommitsCount: CnbStringOrIntegerWire = CnbStringOrIntegerWire(""),
-) {
-    fun toDomain(): CnbWebhookRef =
-        CnbWebhookRef(
-            name = name.required("name"),
-            sha = sha.orEmpty(),
-            before = before.orEmpty(),
-            commit = commit.orEmpty(),
-            tag = tag,
-            newCommitsCount = newCommitsCount.value,
-        )
-}
-
-@KotlinSerializable
-private data class CnbWebhookPullRequestWire(
-    val id: String? = null,
-    val number: String? = null,
-    val title: String? = null,
-    val description: String? = null,
-    val proposer: String? = null,
-    @SerialName("source_repo") val sourceRepository: String? = null,
-    @SerialName("source_branch") val sourceBranch: String? = null,
-    @SerialName("source_sha") val sourceSha: String? = null,
-    @SerialName("target_branch") val targetBranch: String? = null,
-    @SerialName("target_sha") val targetSha: String? = null,
-    @SerialName("merge_sha") val mergeSha: String? = null,
-    val action: String? = null,
-    @KotlinSerializable(with = CnbBooleanWireSerializer::class)
-    val wip: Boolean = false,
-    val reviewers: String? = null,
-    @SerialName("review_state") val reviewState: String? = null,
-    @SerialName("reviewed_by") val reviewedBy: String? = null,
-    @SerialName("last_reviewed_by") val lastReviewedBy: String? = null,
-    @SerialName("comment_id") val commentId: String? = null,
-    @SerialName("comment_body") val commentBody: String? = null,
-    @SerialName("comment_type") val commentType: String? = null,
-    @SerialName("comment_file_path") val commentFilePath: String? = null,
-    @SerialName("comment_range") val commentRange: String? = null,
-    @SerialName("review_id") val reviewId: String? = null,
-    @SerialName("review_description") val reviewDescription: String? = null,
-) {
-    fun toDomain(): CnbWebhookPullRequest =
-        CnbWebhookPullRequest(
-            id = id.required("id"),
-            number = number.required("number"),
-            title = title.orEmpty(),
-            description = description.orEmpty(),
-            proposer = proposer.orEmpty(),
-            sourceRepository = sourceRepository.required("source_repo"),
-            sourceBranch = sourceBranch.required("source_branch"),
-            sourceSha = sourceSha.required("source_sha"),
-            targetBranch = targetBranch.required("target_branch"),
-            targetSha = targetSha.required("target_sha"),
-            mergeSha = mergeSha?.takeIf(String::isNotBlank),
-            action = action.orEmpty(),
-            wip = wip,
-            reviewers = reviewers.orEmpty(),
-            reviewState = reviewState.orEmpty(),
-            reviewedBy = reviewedBy.orEmpty(),
-            lastReviewedBy = lastReviewedBy.orEmpty(),
-            commentId = commentId.orEmpty(),
-            commentBody = commentBody.orEmpty(),
-            commentType = commentType.orEmpty(),
-            commentFilePath = commentFilePath.orEmpty(),
-            commentRange = commentRange.orEmpty(),
-            reviewId = reviewId.orEmpty(),
-            reviewDescription = reviewDescription.orEmpty(),
-        )
-}
-
-private fun CnbWebhookPayloadWire.decodeFragments(decode: (String) -> String): CnbWebhookPayloadWire =
-    copy(
-        schema = decode(schema),
-        installationId = decode(installationId),
-        deliveryId = decode(deliveryId),
-        buildId = buildId.decodeWith(decode),
-        occurredAt = decode(occurredAt),
-        event = decode(event),
-        eventUrl = eventUrl.decodeWith(decode),
-        instance = instance.decodeFragments(decode),
-        repository = repository.decodeFragments(decode),
-        actor = actor?.decodeFragments(decode),
-        ref = ref.decodeFragments(decode),
-        pullRequest = pullRequest?.decodeFragments(decode),
-    )
-
-private fun CnbWebhookInstanceWire.decodeFragments(decode: (String) -> String): CnbWebhookInstanceWire =
-    copy(webUrl = decode(webUrl), apiUrl = decode(apiUrl))
-
-private fun CnbWebhookRepositoryWire.decodeFragments(decode: (String) -> String): CnbWebhookRepositoryWire =
-    copy(id = decode(id), slug = decode(slug), url = decode(url))
-
-private fun CnbWebhookActorWire.decodeFragments(decode: (String) -> String): CnbWebhookActorWire =
-    copy(
-        id = id.decodeWith(decode),
-        username = username.decodeWith(decode),
-        nickname = nickname.decodeWith(decode),
-        email = email.decodeWith(decode),
-    )
-
-private fun CnbWebhookRefWire.decodeFragments(decode: (String) -> String): CnbWebhookRefWire =
-    copy(
-        name = decode(name),
-        sha = sha.decodeWith(decode),
-        before = before.decodeWith(decode),
-        commit = commit.decodeWith(decode),
-        newCommitsCount = CnbStringOrIntegerWire(decode(newCommitsCount.value)),
-    )
-
-private fun CnbWebhookPullRequestWire.decodeFragments(decode: (String) -> String): CnbWebhookPullRequestWire =
-    copy(
-        id = id.decodeWith(decode),
-        number = number.decodeWith(decode),
-        title = title.decodeWith(decode),
-        description = description.decodeWith(decode),
-        proposer = proposer.decodeWith(decode),
-        sourceRepository = sourceRepository.decodeWith(decode),
-        sourceBranch = sourceBranch.decodeWith(decode),
-        sourceSha = sourceSha.decodeWith(decode),
-        targetBranch = targetBranch.decodeWith(decode),
-        targetSha = targetSha.decodeWith(decode),
-        mergeSha = mergeSha.decodeWith(decode),
-        action = action.decodeWith(decode),
-        reviewers = reviewers.decodeWith(decode),
-        reviewState = reviewState.decodeWith(decode),
-        reviewedBy = reviewedBy.decodeWith(decode),
-        lastReviewedBy = lastReviewedBy.decodeWith(decode),
-        commentId = commentId.decodeWith(decode),
-        commentBody = commentBody.decodeWith(decode),
-        commentType = commentType.decodeWith(decode),
-        commentFilePath = commentFilePath.decodeWith(decode),
-        commentRange = commentRange.decodeWith(decode),
-        reviewId = reviewId.decodeWith(decode),
-        reviewDescription = reviewDescription.decodeWith(decode),
-    )
-
-private fun String?.decodeWith(decode: (String) -> String): String? = this?.let(decode)
-
-@KotlinSerializable(with = CnbStringOrIntegerWireSerializer::class)
-private data class CnbStringOrIntegerWire(
-    val value: String,
-)
-
-private object CnbBooleanWireSerializer : KSerializer<Boolean> {
-    override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("CnbBoolean", PrimitiveKind.BOOLEAN)
-
-    override fun deserialize(decoder: Decoder): Boolean {
-        val primitive =
-            (decoder as? JsonDecoder)?.decodeJsonElement() as? JsonPrimitive
-                ?: throw SerializationException("Expected a boolean")
-        return if (primitive.isString) {
-            when (primitive.content) {
-                "true" -> true
-                "false", "" -> false
-                else -> throw SerializationException("Expected a boolean")
-            }
-        } else {
-            primitive.booleanOrNull ?: throw SerializationException("Expected a boolean")
-        }
-    }
-
-    override fun serialize(
-        encoder: Encoder,
-        value: Boolean,
-    ) = encoder.encodeBoolean(value)
-}
-
-private object CnbStringOrIntegerWireSerializer : KSerializer<CnbStringOrIntegerWire> {
-    override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("CnbStringOrInteger", PrimitiveKind.STRING)
-
-    override fun deserialize(decoder: Decoder): CnbStringOrIntegerWire {
-        val primitive =
-            (decoder as? JsonDecoder)?.decodeJsonElement() as? JsonPrimitive
-                ?: throw SerializationException("Expected a string or integer")
-        if (!primitive.isString && !INTEGER_PATTERN.matches(primitive.content)) {
-            throw SerializationException("Expected a string or integer")
-        }
-        return CnbStringOrIntegerWire(primitive.content)
-    }
-
-    override fun serialize(
-        encoder: Encoder,
-        value: CnbStringOrIntegerWire,
-    ) = encoder.encodeString(value.value)
-
-    private val INTEGER_PATTERN = Regex("-?(?:0|[1-9][0-9]*)")
 }
 
 private fun String?.required(field: String): String =
     this?.takeIf(String::isNotBlank) ?: throw CnbWebhookFormatException("$field is required")
+
+private fun String?.optionalBoolean(field: String): Boolean? =
+    when (this) {
+        null, "" -> null
+        "true" -> true
+        "false" -> false
+        else -> throw CnbWebhookFormatException("$field must be true or false")
+    }
+
+private fun String?.booleanOrDefault(
+    field: String,
+    default: Boolean,
+): Boolean = optionalBoolean(field) ?: default

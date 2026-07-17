@@ -25,8 +25,7 @@ internal object CnbWebhookValidator {
         now: Instant,
     ) {
         requireValid(serverIdPattern.matches(pathServerId), "Invalid server ID")
-        requireValid(payload.schema == CnbWebhookPayload.SCHEMA_V1, "Unsupported webhook schema")
-        requireValid(payload.installationId == pathServerId && server.id == pathServerId, "Installation mismatch")
+        requireValid(server.id == pathServerId, "Server mismatch")
         requireValid(deliveryPattern.matches(payload.deliveryId), "Invalid delivery ID")
         requireSafeText(payload.buildId, MAX_IDENTIFIER_LENGTH, allowEmpty = true, label = "build_id")
 

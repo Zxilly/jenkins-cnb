@@ -234,18 +234,24 @@ class CnbWebhookActionHealthTest {
     private fun validPayload(): ByteArray =
         """
         {
-          "schema":"dev.zxilly.jenkins.cnb.webhook.v1",
-          "installation_id":"cnb-cool",
-          "delivery_id":"delivery-${System.nanoTime()}",
-          "build_id":"build-health-1",
-          "occurred_at":"${Instant.now()}",
-          "event":"push",
-          "event_url":"https://cnb.cool/team/project?token=must-not-leak",
-          "is_retry":false,
-          "instance":{"web_url":"https://cnb.cool","api_url":"https://api.cnb.cool"},
-          "repository":{"id":"repo-health-1","slug":"team/project","url":"https://cnb.cool/team/project"},
-          "actor":{"id":"user-health-1","username":"alice"},
-          "ref":{"name":"main","sha":"${"a".repeat(40)}","before":"${"b".repeat(40)}","commit":"${"a".repeat(40)}","is_tag":false}
+          "CNB_WEB_ENDPOINT":"https://cnb.cool",
+          "CNB_API_ENDPOINT":"https://api.cnb.cool",
+          "CNB_EVENT":"push",
+          "CNB_EVENT_URL":"https://cnb.cool/team/project?token=must-not-leak",
+          "CNB_BRANCH":"main",
+          "CNB_BRANCH_SHA":"${"a".repeat(40)}",
+          "CNB_BEFORE_SHA":"${"b".repeat(40)}",
+          "CNB_COMMIT":"${"a".repeat(40)}",
+          "CNB_IS_TAG":"false",
+          "CNB_REPO_SLUG":"team/project",
+          "CNB_REPO_ID":"repo-health-1",
+          "CNB_REPO_URL_HTTPS":"https://cnb.cool/team/project",
+          "CNB_BUILD_ID":"build-health-1",
+          "CNB_BUILD_START_TIME":"${Instant.now()}",
+          "CNB_BUILD_USER":"alice",
+          "CNB_BUILD_USER_ID":"user-health-1",
+          "CNB_PIPELINE_ID":"delivery-${System.nanoTime()}",
+          "CNB_IS_RETRY":"false"
         }
         """.trimIndent().toByteArray(StandardCharsets.UTF_8)
 

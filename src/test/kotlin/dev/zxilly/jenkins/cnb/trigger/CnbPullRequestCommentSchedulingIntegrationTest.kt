@@ -268,8 +268,6 @@ class CnbPullRequestCommentSchedulingIntegrationTest {
         CnbWebhookDelivery(
             "primary",
             CnbWebhookPayload(
-                schema = CnbWebhookPayload.SCHEMA_V1,
-                installationId = "primary",
                 deliveryId = "comment-delivery-9",
                 buildId = "build-9",
                 occurredAt = Instant.EPOCH,

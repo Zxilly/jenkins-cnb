@@ -308,8 +308,6 @@ class CnbOpenPullRequestTargetPushResolverTest {
         CnbWebhookDelivery(
             "primary",
             CnbWebhookPayload(
-                schema = CnbWebhookPayload.SCHEMA_V1,
-                installationId = "primary",
                 deliveryId = "delivery-target-push",
                 buildId = "build-target-push",
                 occurredAt = Instant.EPOCH,

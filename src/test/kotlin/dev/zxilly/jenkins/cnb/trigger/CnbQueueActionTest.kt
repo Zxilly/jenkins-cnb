@@ -227,8 +227,6 @@ class CnbQueueActionTest {
         CnbWebhookDelivery(
             "primary",
             CnbWebhookPayload(
-                CnbWebhookPayload.SCHEMA_V1,
-                "primary",
                 "delivery-$ref-${sha.first()}",
                 "build-1",
                 Instant.EPOCH,
@@ -251,8 +249,6 @@ class CnbQueueActionTest {
         CnbWebhookDelivery(
             "primary",
             CnbWebhookPayload(
-                CnbWebhookPayload.SCHEMA_V1,
-                "primary",
                 "delivery-pr-${sourceSha.first()}",
                 "build-1",
                 Instant.EPOCH,

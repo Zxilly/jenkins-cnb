@@ -36,6 +36,8 @@ class CnbJCasCTest {
         assertEquals("acme/application", server.getWebhookCredentials().single().repositoryPath)
         assertEquals("webhook", server.getWebhookCredentials().single().secretCredentialsId)
         assertEquals(CnbStatusReportingMode.PULL_REQUEST_COMMENT, server.statusReportingMode)
+        assertTrue(server.automaticBuildBadgeEnabled)
+        assertEquals("ci/jenkins", server.automaticBuildBadgeKey)
         assertFalse(server.allowInsecureHttp)
         assertTrue(server.allowPrivateNetwork)
         assertTrue(server.eventPollingEnabled)
@@ -63,6 +65,8 @@ class CnbJCasCTest {
         val yaml = Util.toYamlString(exported)
         assertTrue(yaml.contains("enterprise"))
         assertTrue(yaml.contains("https://api.cnb.example.com"))
+        assertTrue(yaml.contains("automaticBuildBadgeEnabled"))
+        assertTrue(yaml.contains("automaticBuildBadgeKey"))
         assertFalse(yaml.contains("secret-value"))
     }
 }

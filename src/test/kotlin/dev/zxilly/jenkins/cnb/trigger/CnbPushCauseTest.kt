@@ -18,8 +18,6 @@ class CnbPushCauseTest {
     fun `exports documented CNB variables without credentials`() {
         val payload =
             CnbWebhookPayload(
-                CnbWebhookPayload.SCHEMA_V1,
-                "cnb-cool",
                 "pipeline-1",
                 "build-1",
                 Instant.parse("2026-07-15T10:00:00Z"),
@@ -72,8 +70,6 @@ class CnbPushCauseTest {
             )
         val payload =
             CnbWebhookPayload(
-                CnbWebhookPayload.SCHEMA_V1,
-                "cnb-cool",
                 "pipeline-pr-7",
                 "build-pr-7",
                 Instant.parse("2026-07-15T10:00:00Z"),

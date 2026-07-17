@@ -404,6 +404,7 @@ private class KtorCnbHttpTransport(
         reader: CnbHttpResponseReader<T>,
     ): CnbHttpResponse<T> {
         if (closed.get()) throw IOException("CNB HTTP transport is closed")
+        val requestResources = CnbRequestResources()
         val cleanupFailure = AtomicReference<CnbApiException?>()
         val reportCleanupFailure: (CnbApiException) -> Unit = { failure ->
             cleanupFailure.compareAndSet(null, failure)
@@ -420,7 +421,7 @@ private class KtorCnbHttpTransport(
                             if (!request.negotiateCnbJson || request.headers.firstValue("Accept") != null) {
                                 exclude(ContentType.Application.Json)
                             }
-                            setBody(request.body.toOutgoingContent(blockingIo, reportCleanupFailure))
+                            setBody(request.body.toOutgoingContent(blockingIo, requestResources, reportCleanupFailure))
                         }.execute { response ->
                             val context =
                                 KtorCnbHttpResponseContext(
@@ -441,6 +442,9 @@ private class KtorCnbHttpTransport(
                 }
             }
         } catch (failure: TimeoutCancellationException) {
+            requestResources.closeAndAwait()?.let { closeFailure ->
+                findCleanupApiFailure(closeFailure)?.let(reportCleanupFailure)
+            }
             cleanupFailure.get()?.let { cleanup ->
                 cleanup.addSuppressed(failure)
                 throw cleanup
@@ -465,6 +469,8 @@ private class KtorCnbHttpTransport(
                 if (closed.get()) "CNB HTTP transport is closed" else "CNB HTTP transport was cancelled",
                 failure,
             )
+        } finally {
+            requestResources.requestClose()
         }
     }
 
@@ -521,6 +527,7 @@ private class KtorCnbHttpTransport(
 
 private fun CnbHttpRequestBody.toOutgoingContent(
     blockingIo: CnbBlockingIo,
+    requestResources: CnbRequestResources,
     reportCleanupFailure: (CnbApiException) -> Unit,
 ): OutgoingContent =
     when (this) {
@@ -537,19 +544,20 @@ private fun CnbHttpRequestBody.toOutgoingContent(
         }
 
         is CnbHttpRequestBody.RepeatableStream -> {
-            RepeatableStreamContent(this, blockingIo, reportCleanupFailure)
+            RepeatableStreamContent(this, blockingIo, requestResources, reportCleanupFailure)
         }
     }
 
 private class RepeatableStreamContent(
     private val body: CnbHttpRequestBody.RepeatableStream,
     private val blockingIo: CnbBlockingIo,
+    private val requestResources: CnbRequestResources,
     private val reportCleanupFailure: (CnbApiException) -> Unit,
 ) : OutgoingContent.WriteChannelContent() {
     override val contentLength: Long = body.contentLength
 
     override suspend fun writeTo(channel: ByteWriteChannel) {
-        blockingIo.useResource({ body.openStream() }, reportCleanupFailure) { input ->
+        blockingIo.useResource({ body.openStream() }, requestResources, reportCleanupFailure) { input ->
             try {
                 var remaining = body.contentLength
                 val buffer = ByteArray(BUFFER_BYTES)
@@ -671,6 +679,52 @@ private class KtorCnbHttpResponseContext(
     }
 }
 
+/** Tracks resources owned by one request so a deadline never closes another request's streams. */
+private class CnbRequestResources {
+    private val lock = Any()
+    private val resources = LinkedHashSet<CnbCloseTicket>()
+    private var closeRequested = false
+
+    fun register(resource: CnbCloseTicket) {
+        val closeNow =
+            synchronized(lock) {
+                if (closeRequested) {
+                    true
+                } else {
+                    resources += resource
+                    false
+                }
+            }
+        if (closeNow) resource.requestClose()
+    }
+
+    fun unregister(resource: CnbCloseTicket) {
+        synchronized(lock) { resources -= resource }
+    }
+
+    fun requestClose() {
+        resourcesToClose().forEach(CnbCloseTicket::requestClose)
+    }
+
+    fun closeAndAwait(): Throwable? {
+        val resources = resourcesToClose()
+        resources.forEach(CnbCloseTicket::requestClose)
+        val deadline = resourceCloseDeadline()
+        var firstFailure: Throwable? = null
+        resources.forEach { resource ->
+            val closeFailure = resource.awaitClose(deadline)
+            if (closeFailure != null) firstFailure = mergeFailures(firstFailure, closeFailure)
+        }
+        return firstFailure
+    }
+
+    private fun resourcesToClose(): List<CnbCloseTicket> =
+        synchronized(lock) {
+            closeRequested = true
+            resources.toList()
+        }
+}
+
 /** Runs blocking Jenkins/Remoting streams without making Ktor's engine threads non-cancellable. */
 private class CnbBlockingIo(
     private val executor: ExecutorService,
@@ -686,11 +740,12 @@ private class CnbBlockingIo(
 
     suspend fun <T : Closeable, R> useResource(
         openResource: () -> T,
+        requestResources: CnbRequestResources,
         reportCleanupFailure: (CnbApiException) -> Unit,
         block: suspend (T) -> R,
     ): R =
         coroutineScope {
-            val tracked = openTrackedResource(openResource)
+            val tracked = openTrackedResource(openResource, requestResources)
             val completedNormally = AtomicBoolean()
             var operationFailure: Throwable? = null
             val cancellationCloser =
@@ -727,20 +782,26 @@ private class CnbBlockingIo(
                     }
                 } finally {
                     activeResources -= tracked
+                    requestResources.unregister(tracked)
                 }
             }
         }
 
-    private suspend fun <T : Closeable> openTrackedResource(openResource: () -> T): CnbTrackedCloseable<T> =
+    private suspend fun <T : Closeable> openTrackedResource(
+        openResource: () -> T,
+        requestResources: CnbRequestResources,
+    ): CnbTrackedCloseable<T> =
         suspendCancellableCoroutine { continuation ->
             val task =
                 FutureTask {
                     try {
                         val tracked = CnbTrackedCloseable(openResource())
                         activeResources += tracked
+                        requestResources.register(tracked)
                         continuation.resume(tracked) { _, lateResource, _ ->
                             lateResource.requestClose()
                             activeResources -= lateResource
+                            requestResources.unregister(lateResource)
                         }
                     } catch (failure: Throwable) {
                         continuation.resumeWith(Result.failure(failure))
