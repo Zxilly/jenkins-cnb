@@ -2,6 +2,7 @@ package dev.zxilly.jenkins.cnb.status
 
 import dev.zxilly.jenkins.cnb.api.CnbClient
 import dev.zxilly.jenkins.cnb.api.CnbClientFactory
+import dev.zxilly.jenkins.cnb.api.model.CnbBadgeUploadRequest
 import dev.zxilly.jenkins.cnb.api.model.CnbCommitAnnotation
 import dev.zxilly.jenkins.cnb.api.model.CnbPullComment
 import dev.zxilly.jenkins.cnb.api.model.CnbTagAnnotation
@@ -19,7 +20,7 @@ internal data class CnbBuildMetadataReportResult(
     val commentId: String?,
 )
 
-/** Writes CNB commit annotations and one durable PR comment. Native commit statuses are not used. */
+/** Writes CNB build badges, commit annotations, and one durable PR comment. Native commit statuses are not used. */
 internal object CnbBuildMetadataReporter {
     private const val CONTEXT_SLUG_LENGTH = 72
     private val commentLocks = Array(64) { ReentrantLock() }
@@ -31,7 +32,8 @@ internal object CnbBuildMetadataReporter {
         val target = snapshot.target
         val server = CnbGlobalConfiguration.get().findServer(target.serverId)
         val mode = server.statusReportingMode ?: CnbStatusReportingMode.BOTH
-        if (mode == CnbStatusReportingMode.DISABLED) {
+        val badgeKey = server.automaticBuildBadgeKey?.takeIf { server.automaticBuildBadgeEnabled }
+        if (mode == CnbStatusReportingMode.DISABLED && badgeKey == null) {
             return CnbBuildMetadataReportResult(snapshot.knownCommentId)
         }
         val credentialsId =
@@ -40,7 +42,7 @@ internal object CnbBuildMetadataReporter {
                 ?: server.credentialsId?.takeIf(String::isNotBlank)
 
         CnbClientFactory.create(target.serverId, credentialsId, item).use { client ->
-            return reportWithClient(snapshot, client, mode)
+            return reportWithClient(snapshot, client, mode, badgeKey)
         }
     }
 
@@ -53,6 +55,7 @@ internal object CnbBuildMetadataReporter {
         snapshot: CnbBuildMetadataSnapshot,
         client: CnbClient,
         mode: CnbStatusReportingMode,
+        badgeKey: String? = null,
     ): CnbBuildMetadataReportResult {
         var commentId = snapshot.knownCommentId
         val failures = mutableListOf<Exception>()
@@ -62,6 +65,13 @@ internal object CnbBuildMetadataReporter {
             } else {
                 client.capabilities.supportsTagAnnotations
             }
+        if (badgeKey != null) {
+            try {
+                updateBuildBadge(client, snapshot, badgeKey)
+            } catch (failure: Exception) {
+                failures += failure
+            }
+        }
         if (mode.reportsAnnotations() && supportsTargetAnnotations) {
             try {
                 updateAnnotations(client, snapshot)
@@ -86,6 +96,27 @@ internal object CnbBuildMetadataReporter {
         failures.firstOrNull()?.let { throw it }
         return CnbBuildMetadataReportResult(commentId)
     }
+
+    private fun updateBuildBadge(
+        client: CnbClient,
+        snapshot: CnbBuildMetadataSnapshot,
+        badgeKey: String,
+    ) {
+        val target = snapshot.target
+        client.uploadBadge(
+            target.commitRepository,
+            CnbBadgeUploadRequest(
+                key = badgeKey,
+                sha = target.sha,
+                message = snapshot.state.wireName,
+                link = snapshot.buildUrl.takeIf(::isAbsoluteHttpUrl).orEmpty(),
+                latest = true,
+            ),
+        )
+    }
+
+    private fun isAbsoluteHttpUrl(value: String): Boolean =
+        value.startsWith("https://", ignoreCase = true) || value.startsWith("http://", ignoreCase = true)
 
     @SuppressFBWarnings(
         value = ["BC_BAD_CAST_TO_ABSTRACT_COLLECTION"],
