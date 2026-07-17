@@ -210,7 +210,7 @@ Pull Request Action 默认只在成功构建后执行。关闭此限制前，请
 
 CNB 当前没有供 Jenkins 自动创建仓库 Webhook 的 API。请在可信的 `.cnb.yml` 中使用固定版本的
 `cnbcool/webhook:v1.0.2`，并按照 [Webhook 接入指南](docs/webhook.md) 直接转发插件默认的扁平
-`CNB_*` JSON。不要配置自定义 `template`。
+`CNB_*` JSON。
 
 Jenkins 接收地址为：
 

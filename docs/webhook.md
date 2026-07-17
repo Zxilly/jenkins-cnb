@@ -3,8 +3,7 @@
 CNB 当前没有公开的仓库 Webhook CRUD API。Jenkins 通过 CNB Pipeline 中固定版本的官方
 [`cnbcool/webhook`](https://cnb.cool/cnb/plugins/cnbcool/webhook) 插件接收事件通知。
 
-Jenkins 只接受 `cnbcool/webhook:v1.0.2` 未配置 `template` 时发送的扁平 `CNB_*` JSON。
-旧的 Jenkins 专用 schema、嵌套 payload、`encoding` marker 和自定义 Handlebars 模板均不受支持。
+Jenkins 接收 `cnbcool/webhook:v1.0.2` 默认发送的扁平 `CNB_*` JSON。
 
 ## 安全模型
 
@@ -51,8 +50,8 @@ main:
             debug: false
 ```
 
-不要设置 `template`。插件默认生成的扁平 JSON 已包含 Jenkins 定位事件所需的 `CNB_EVENT`、
-`CNB_REPO_SLUG`、`CNB_PIPELINE_ID`、ref/SHA、PR IID 和评论 ID 等字段。
+插件默认生成的扁平 JSON 已包含 Jenkins 定位事件所需的 `CNB_EVENT`、`CNB_REPO_SLUG`、
+`CNB_PIPELINE_ID`、ref/SHA、PR IID 和评论 ID 等字段。
 
 对需要唤醒 Jenkins 的其他事件复用同一 stage。常见事件包括：
 

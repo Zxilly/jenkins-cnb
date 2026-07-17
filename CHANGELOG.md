@@ -9,7 +9,7 @@ Conventional Commits.
 - Organization Folder and Multibranch discovery for branches, tags, and pull requests.
 - HTTPS Git checkout, fork trust policies, local merge builds, and REST-backed lightweight checkout.
 - Repository-bound signed webhook ingestion for the native flat `cnbcool/webhook:v1.0.2` payload, plus persistent
-  event-archive recovery. The former custom nested bridge schema is no longer accepted.
+  event-archive recovery.
 - A 1 MiB declared and chunked webhook body limit enforced before JSON processing.
 - Classic-job triggers, Pipeline metadata step, PR comments, and commit annotations.
 - Strongly typed PR, review, Build, Release, and Release Asset Pipeline/Freestyle operations.
