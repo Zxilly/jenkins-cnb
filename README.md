@@ -31,6 +31,7 @@
 - 支持 Freestyle、Pipeline、Multibranch Pipeline 和 Organization Folder。
 - 发现分支、Tag、同仓 Pull Request 和 Fork Pull Request。
 - 支持 Pull Request HEAD 与 MERGE 两种 checkout 策略。
+- 在 Multibranch Pipeline 和 Organization Folder 中显示 CNB namespace 头像。
 - 将 Jenkins changelog 中明确的 CNB Pull Request 和 Commit 转为可点击链接。
 - 接收 Push、分支、Tag、Pull Request、评审和评论事件。
 - 按分支、Tag、Pull Request、Draft、标签和评论者角色过滤构建。
