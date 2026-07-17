@@ -19,6 +19,5 @@ Conventional Commits.
 - CNB-compatible annotation key namespaces with fail-fast mutation validation.
 - Strongly typed, bounded batch reads for Commit annotations in API and Pipeline.
 - Strongly typed CNB Badge list, JSON read, and explicit upload steps with README-ready URLs.
-- Durable automatic CNB build-status Badge updates for queued, running, cancelled, and final Jenkins lifecycle states.
 - Ktor 3.5.1 Apache5 transport integrated with kotlinx.serialization and bounded streaming transfers.
 - Java 17 bytecode, Jenkins 2.541.3 minimum, Java 17/21/25 CI, and an enforced 86% line-coverage floor.

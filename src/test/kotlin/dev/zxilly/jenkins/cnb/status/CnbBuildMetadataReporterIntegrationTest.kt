@@ -81,51 +81,15 @@ class CnbBuildMetadataReporterIntegrationTest {
         assertEquals("known-comment", result.commentId)
     }
 
-    @Test
-    fun `automatic badge reports through the real CNB HTTP adapter when metadata destinations are disabled`(jenkins: JenkinsRule) {
-        assertTrue(jenkins.jenkins.isUseSecurity.not())
-        val requests = CopyOnWriteArrayList<Pair<String, String>>()
-        val bodies = CopyOnWriteArrayList<String>()
-        val http = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        http.createContext("/") { exchange ->
-            requests += exchange.requestMethod to exchange.requestURI.path
-            bodies += exchange.requestBody.readAllBytes().toString(StandardCharsets.UTF_8)
-            val base = "http://127.0.0.1:${http.address.port}/contributor/repo/-/badge"
-            respond(
-                exchange,
-                200,
-                """{"url":"$base/git/aaaaaaaa/security/tca","latest":"$base/git/latest/security/tca"}""",
-            )
-        }
-        http.start()
-        try {
-            configureServer(http, CnbStatusReportingMode.DISABLED, automaticBadge = true)
-
-            CnbBuildMetadataReporter.report(snapshot(), item = null)
-
-            assertEquals(listOf("POST" to "/contributor/repo/-/badge/upload"), requests.toList())
-            val body = bodies.single()
-            assertTrue(body.contains("\"key\":\"security/tca\""))
-            assertTrue(body.contains("\"message\":\"success\""))
-            assertTrue(body.contains("\"latest\":true"))
-            assertTrue(body.contains("\"sha\":\"${"a".repeat(40)}\""))
-        } finally {
-            http.stop(0)
-        }
-    }
-
     private fun configureServer(
         http: HttpServer,
         mode: CnbStatusReportingMode,
-        automaticBadge: Boolean = false,
     ) {
         val base = "http://127.0.0.1:${http.address.port}"
         val server = CnbServer("local", "Local CNB", base, base)
         server.setAllowInsecureHttp(true)
         server.setAllowPrivateNetwork(true)
         server.setStatusReportingMode(mode)
-        server.setAutomaticBuildBadgeEnabled(automaticBadge)
-        server.setAutomaticBuildBadgeKey("security/tca")
         CnbGlobalConfiguration.get().setServers(listOf(server))
     }
 
