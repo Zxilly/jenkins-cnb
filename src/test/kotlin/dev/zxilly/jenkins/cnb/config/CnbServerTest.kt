@@ -83,6 +83,8 @@ class CnbServerTest {
         server.setConnectTimeoutSeconds(0)
         server.setRequestTimeoutSeconds(Int.MAX_VALUE)
         server.setStatusReportingMode(null)
+        server.setAutomaticBuildBadgeEnabled(true)
+        server.setAutomaticBuildBadgeKey(" security/tca ")
         val current = CnbWebhookCredentials("/team/project/", "current")
         current.setPreviousSecretCredentialsId(" previous ")
         server.setWebhookCredentials(listOf(current))
@@ -101,6 +103,8 @@ class CnbServerTest {
         assertEquals(1, server.connectTimeoutSeconds)
         assertEquals(600, server.requestTimeoutSeconds)
         assertEquals(CnbStatusReportingMode.BOTH, server.statusReportingMode)
+        assertTrue(server.automaticBuildBadgeEnabled)
+        assertEquals("security/tca", server.automaticBuildBadgeKey)
         assertEquals("previous", current.previousSecretCredentialsId)
         assertSame(current, server.webhookCredentialsFor(" /team/project/ "))
         assertEquals(listOf(current), server.getWebhookCredentials())
@@ -116,6 +120,8 @@ class CnbServerTest {
         assertEquals("http://127.0.0.1:8080", local.normalizedWebUri().toString())
         assertEquals("http://127.0.0.1:8081", local.normalizedApiUri().toString())
         assertEquals("cnb-cool", CnbServer.defaultServer().id)
+        assertFalse(CnbServer.defaultServer().automaticBuildBadgeEnabled)
+        assertEquals("security/tca", CnbServer.defaultServer().automaticBuildBadgeKey)
     }
 
     @Test
@@ -142,6 +148,8 @@ class CnbServerTest {
         val reporting = descriptor.doFillReportingCredentialsIdItems("https://api.cnb.cool", "secret-token")
         assertTrue(reporting.map { it.value }.contains("secret-token"))
         assertEquals(CnbStatusReportingMode.entries.size, descriptor.doFillStatusReportingModeItems().size)
+        assertEquals(FormValidation.Kind.OK, descriptor.doCheckAutomaticBuildBadgeKey("security/tca").kind)
+        assertEquals(FormValidation.Kind.ERROR, descriptor.doCheckAutomaticBuildBadgeKey("../status").kind)
 
         val webhookDescriptor =
             requireNotNull(jenkins.jenkins.getDescriptor(CnbWebhookCredentials::class.java)) as CnbWebhookCredentials.DescriptorImpl

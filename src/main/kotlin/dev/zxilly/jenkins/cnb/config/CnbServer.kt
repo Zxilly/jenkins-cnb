@@ -62,6 +62,10 @@ class CnbServer
             private set
         var statusReportingMode: CnbStatusReportingMode? = CnbStatusReportingMode.BOTH
             private set
+        var automaticBuildBadgeEnabled: Boolean = false
+            private set
+        var automaticBuildBadgeKey: String? = DEFAULT_BUILD_BADGE_KEY
+            private set
 
         @DataBoundSetter
         fun setCredentialsId(value: String?) {
@@ -129,6 +133,16 @@ class CnbServer
             statusReportingMode = value ?: CnbStatusReportingMode.BOTH
         }
 
+        @DataBoundSetter
+        fun setAutomaticBuildBadgeEnabled(value: Boolean) {
+            automaticBuildBadgeEnabled = value
+        }
+
+        @DataBoundSetter
+        fun setAutomaticBuildBadgeKey(value: String?) {
+            automaticBuildBadgeKey = normalizeBuildBadgeKey(value)
+        }
+
         fun normalizedApiUri() = CnbEndpointPolicy.validateAndNormalize(apiUrl, allowInsecureHttp, allowPrivateNetwork)
 
         fun normalizedWebUri() = CnbEndpointPolicy.validateAndNormalize(webUrl, allowInsecureHttp, allowPrivateNetwork)
@@ -155,6 +169,7 @@ class CnbServer
             if (statusReportingMode == null) {
                 statusReportingMode = CnbStatusReportingMode.BOTH
             }
+            automaticBuildBadgeKey = normalizeBuildBadgeKey(automaticBuildBadgeKey)
             normalizedWebUri()
             normalizedApiUri()
             return this
@@ -199,6 +214,19 @@ class CnbServer
                         add(it.name.lowercase(Locale.ROOT).replace('_', ' '), it.name)
                     }
                 }
+
+            @POST
+            fun doCheckAutomaticBuildBadgeKey(
+                @QueryParameter value: String?,
+            ): FormValidation {
+                Jenkins.get().checkPermission(Jenkins.MANAGE)
+                return try {
+                    normalizeBuildBadgeKey(value)
+                    FormValidation.ok()
+                } catch (exception: IllegalArgumentException) {
+                    FormValidation.error(exception.message)
+                }
+            }
 
             @POST
             fun doCheckId(
@@ -329,6 +357,8 @@ class CnbServer
             private const val serialVersionUID = 1L
             private const val MAX_NAME_LENGTH = 128
             private const val MAX_ENDPOINT_LENGTH = 2_048
+            private const val MAX_BUILD_BADGE_KEY_LENGTH = 1_024
+            private const val DEFAULT_BUILD_BADGE_KEY = "security/tca"
             internal val ID_PATTERN = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
             private fun normalizeId(value: String): String {
@@ -361,6 +391,21 @@ class CnbServer
                 require(normalized.length in 1..MAX_ENDPOINT_LENGTH) {
                     "CNB server $field must contain 1-$MAX_ENDPOINT_LENGTH characters"
                 }
+                return normalized
+            }
+
+            private fun normalizeBuildBadgeKey(value: String?): String {
+                val normalized = value?.trim().takeUnless { it.isNullOrEmpty() } ?: DEFAULT_BUILD_BADGE_KEY
+                require(normalized.length <= MAX_BUILD_BADGE_KEY_LENGTH) {
+                    "CNB build status badge key must be at most $MAX_BUILD_BADGE_KEY_LENGTH characters"
+                }
+                val segments = normalized.split('/')
+                require(
+                    !normalized.startsWith('/') &&
+                        !normalized.endsWith('/') &&
+                        segments.none { it.isEmpty() || it == "." || it == ".." } &&
+                        normalized.none { it == '\\' || it.isWhitespace() || it.code < 0x20 || it.code == 0x7f },
+                ) { "CNB build status badge key must be a safe relative path" }
                 return normalized
             }
 
