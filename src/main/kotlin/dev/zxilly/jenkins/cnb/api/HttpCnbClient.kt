@@ -1864,7 +1864,10 @@ internal class HttpCnbClient(
         body: CnbEncodedJsonBody? = null,
         idempotent: Boolean = method == "GET",
         acceptNotFound: Boolean = false,
-    ): ByteArray? = requestValue(method, path, query, body, idempotent, acceptNotFound) { response -> response.readBytes() }
+    ): ByteArray? =
+        requestValue(method, path, query, body, idempotent, acceptNotFound) { response ->
+            response.readBoundedBytes(MAX_API_RESPONSE_BYTES)
+        }
 
     private fun <T> requestValue(
         method: String,
@@ -2550,14 +2553,10 @@ internal class HttpCnbClient(
         uri: URI,
         body: CnbEncodedJsonBody?,
         includeAuthorization: Boolean = true,
-        maxResponseBytes: Int? = null,
+        maxResponseBytes: Int = MAX_API_RESPONSE_BYTES,
     ): CnbHttpResponse<ByteArray> =
         executeWithReader(method, uri, body, includeAuthorization) { response ->
-            if (maxResponseBytes == null) {
-                response.readBytes()
-            } else {
-                response.readBoundedBytes(maxResponseBytes)
-            }
+            response.readBoundedBytes(maxResponseBytes)
         }
 
     private fun <T> executeWithReader(
@@ -3915,6 +3914,7 @@ internal class HttpCnbClient(
         private const val MAX_PAGES = 100
         private const val MAX_PAGINATED_ITEMS = 10_000
         private const val MAX_PAGINATED_BYTES = 16L * 1024 * 1024
+        private const val MAX_API_RESPONSE_BYTES = 16 * 1024 * 1024
         private const val MAX_CONCURRENT_REQUESTS = 8
         private const val PERMIT_WAIT_SECONDS = 5L
         private const val MAX_ATTEMPTS = 4

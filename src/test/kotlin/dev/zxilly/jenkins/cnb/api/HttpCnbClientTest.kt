@@ -1241,6 +1241,19 @@ class HttpCnbClientTest {
     }
 
     @Test
+    fun `rejects one API response before it can exceed the pagination byte budget`() {
+        val padding = "x".repeat(16 * 1024 * 1024)
+        handlers["/user/repos"] = { exchange ->
+            respond(exchange, 200, """[{"id":"1","path":"org/one","padding":"$padding"}]""")
+        }
+
+        val error = assertThrows(CnbApiException::class.java) { client.listUserRepositories() }
+
+        assertTrue(error.message.orEmpty().contains("response exceeded"))
+        assertEquals(1, requests.size)
+    }
+
+    @Test
     fun `allows the maximum number of data pages followed by an empty sentinel page`() {
         handlers["/user/repos"] = { exchange ->
             val page = query(exchange.requestURI.rawQuery)["page"]!!.toInt()
