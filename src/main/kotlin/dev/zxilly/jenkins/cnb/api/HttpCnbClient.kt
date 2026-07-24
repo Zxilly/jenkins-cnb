@@ -690,15 +690,26 @@ internal class HttpCnbClient(
             acceptNotFound = false,
             acceptNotFoundAfterRetryableFailure = cachedLabel != null,
             notFoundAfterRetryValue = cachedLabel,
-        ) { response ->
-            if (
-                response.statusCode == 204 || response.statusCode == 205 ||
-                response.headers.allValues("Content-Length") == listOf("0")
-            ) {
-                throw CnbApiException("CNB remove pull request label response was empty")
-            }
-            parseLabel(response.readJson<CnbLabelWire>(typeInfo<CnbLabelWire>()))
-        } ?: throw CnbApiException("CNB remove pull request label response was empty")
+            successReader = RemovedPullLabelResponseReader(),
+        ) ?: throw CnbApiException("CNB remove pull request label response was empty")
+    }
+
+    private inner class RemovedPullLabelResponseReader : CnbHttpResponseReader<CnbLabel> {
+        override suspend fun read(response: CnbHttpResponseContext): CnbLabel =
+            readRemovedPullLabel(response)
+    }
+
+    private suspend fun readRemovedPullLabel(response: CnbHttpResponseContext?): CnbLabel {
+        val responseContext =
+            response ?: throw CnbApiException("CNB remove pull request label response was empty")
+        if (
+            responseContext.statusCode == 204 || responseContext.statusCode == 205 ||
+            responseContext.headers.allValues("Content-Length") == listOf("0")
+        ) {
+            throw CnbApiException("CNB remove pull request label response was empty")
+        }
+        val wire: CnbLabelWire? = responseContext.readJson(typeInfo<CnbLabelWire>())
+        return parseLabel(wire ?: throw CnbApiException("CNB remove pull request label response was empty"))
     }
 
     override fun clearPullLabels(
