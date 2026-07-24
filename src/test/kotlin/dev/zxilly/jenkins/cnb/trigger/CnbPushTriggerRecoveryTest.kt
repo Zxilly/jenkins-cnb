@@ -1,5 +1,7 @@
 package dev.zxilly.jenkins.cnb.trigger
 
+import dev.zxilly.jenkins.cnb.api.CnbApiException
+import dev.zxilly.jenkins.cnb.api.model.CnbCommit
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryEvent
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryEventPayload
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryEventType
@@ -79,6 +81,26 @@ class CnbPushTriggerRecoveryTest {
         assertEquals("release/2026.07", environment["CNB_BRANCH"])
         assertEquals("b".repeat(40), environment["CNB_COMMIT"])
         assertEquals("false", environment["CNB_IS_TAG"])
+    }
+
+    @Test
+    fun `missing commit metadata cannot suppress archive recovery`(jenkins: JenkinsRule) {
+        val project = jenkins.createFreeStyleProject("classic-missing-commit-metadata")
+        val trigger = CnbPushTrigger("primary", "team/project", "main").apply { setCiSkip(true) }
+        val event = push("missing-commit-event", "refs/heads/main", "a".repeat(40))
+
+        CnbPushTriggerRecovery.recover(
+            "primary",
+            "team/project",
+            listOf(event),
+            project,
+            trigger,
+            getCommit = { _, _ -> null },
+        )
+        jenkins.waitUntilNoActivity()
+
+        val build = requireNotNull(project.lastBuild)
+        assertEquals("missing-commit-event", requireNotNull(build.getCause(CnbRepositoryEventCause::class.java)).eventId)
     }
 
     @Test
@@ -305,6 +327,51 @@ class CnbPushTriggerRecoveryTest {
             )
         } finally {
             Queue.QueueDecisionHandler.all().remove(veto)
+            Queue.getInstance().items.forEach(Queue.getInstance()::cancel)
+        }
+    }
+
+    @Test
+    fun `archive recovery isolates a checked API failure to its ref`(jenkins: JenkinsRule) {
+        jenkins.jenkins.numExecutors = 0
+        val project = jenkins.createFreeStyleProject("classic-checked-partial-recovery")
+        val trigger = CnbPushTrigger("primary", "team/project", "**")
+        val main = push("event-main-api-failure", "refs/heads/main", "a".repeat(40))
+        val release = push("event-release-api-success", "refs/heads/release", "b".repeat(40))
+
+        try {
+            val failure =
+                assertThrows(CnbPartialRepositoryEventDispatchException::class.java) {
+                    CnbPushTriggerRecovery.recover(
+                        "primary",
+                        "team/project",
+                        listOf(main, release),
+                        project,
+                        trigger,
+                        getCommit = { _, sha ->
+                            if (sha == "a".repeat(40)) {
+                                throw CnbApiException("commit authorization failed", statusCode = 403)
+                            }
+                            CnbCommit(sha, "build this revision")
+                        },
+                    )
+                }
+
+            assertEquals(
+                setOf(CnbRepositoryEventPollingWork.eventKey("primary", "team/project", main)),
+                failure.retryKeys,
+            )
+            assertEquals(
+                "refs/heads/release",
+                requireNotNull(
+                    Queue
+                        .getInstance()
+                        .items
+                        .single()
+                        .getAction(CnbQueueAction::class.java),
+                ).ref,
+            )
+        } finally {
             Queue.getInstance().items.forEach(Queue.getInstance()::cancel)
         }
     }

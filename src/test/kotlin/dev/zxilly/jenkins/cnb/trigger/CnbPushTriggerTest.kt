@@ -296,6 +296,7 @@ class CnbPushTriggerTest {
         fun snapshot(
             body: String = "rebuild",
             author: String = "alice",
+            commentFailure: Int? = null,
             accessFailure: Int? = null,
         ): CnbLiveDeliverySnapshot =
             CnbLiveDeliveryResolver.resolve(
@@ -305,7 +306,10 @@ class CnbPushTriggerTest {
                 getTag = { _, _ -> error("unused") },
                 getPullRequest = { _, number -> livePullRequest(number) },
                 listLabels = { _, _ -> error("unused") },
-                getComment = { _, _, id -> CnbPullComment(id, body, author) },
+                getComment = { _, _, id ->
+                    commentFailure?.let { throw CnbApiException("comment unavailable", it) }
+                    CnbPullComment(id, body, author)
+                },
                 listMemberAccess = { repository, _ ->
                     accessFailure?.let { throw CnbApiException("unavailable", it) }
                     listOf(CnbMemberAccess(repository, CnbMemberAccessLevel.REPORTER))
@@ -315,6 +319,8 @@ class CnbPushTriggerTest {
         assertTrue(snapshot().commentVerified)
         assertFalse(snapshot(body = "edited").commentVerified)
         assertFalse(snapshot(author = "mallory").commentVerified)
+        assertFalse(snapshot(commentFailure = 404).commentVerified)
+        assertEquals(403, assertThrows(CnbApiException::class.java) { snapshot(commentFailure = 403) }.statusCode)
         assertNull(snapshot(accessFailure = 403).actorAccessLevels)
         assertThrows(CnbApiException::class.java) { snapshot(accessFailure = 503) }
     }

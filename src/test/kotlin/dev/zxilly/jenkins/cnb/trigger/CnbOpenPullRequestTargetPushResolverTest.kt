@@ -7,6 +7,7 @@ import dev.zxilly.jenkins.cnb.api.model.CnbBranch
 import dev.zxilly.jenkins.cnb.api.model.CnbCommit
 import dev.zxilly.jenkins.cnb.api.model.CnbLabel
 import dev.zxilly.jenkins.cnb.api.model.CnbPullRequest
+import dev.zxilly.jenkins.cnb.api.model.CnbPullRequestListState
 import dev.zxilly.jenkins.cnb.api.model.CnbPullRequestState
 import dev.zxilly.jenkins.cnb.webhook.CnbWebhookActor
 import dev.zxilly.jenkins.cnb.webhook.CnbWebhookDelivery
@@ -136,6 +137,47 @@ class CnbOpenPullRequestTargetPushResolverTest {
     }
 
     @Test
+    fun `missing target branch is stale but a missing pull request listing remains retryable`() {
+        val missingTarget =
+            object : CnbClient by client() {
+                override fun getBranch(
+                    repo: String,
+                    name: String,
+                ): CnbBranch = throw CnbApiException("target branch missing", statusCode = 404)
+            }
+        assertEquals(
+            emptyList<CnbVerifiedOpenPullRequestPush>(),
+            CnbOpenPullRequestTargetPushResolver.resolve(
+                targetPushDelivery(),
+                CnbLiveDeliveryRequirements(),
+                missingTarget,
+            ),
+        )
+
+        val delegate =
+            client(
+                branches = mapOf("team/project:main" to CnbBranch("main", SHA_C)),
+            )
+        val missingListing =
+            object : CnbClient by delegate {
+                override fun listPullRequests(
+                    repo: String,
+                    state: CnbPullRequestListState,
+                ): List<CnbPullRequest> = throw CnbApiException("pull request listing missing", statusCode = 404)
+            }
+
+        val failure =
+            assertThrows(CnbApiException::class.java) {
+                CnbOpenPullRequestTargetPushResolver.resolve(
+                    targetPushDelivery(),
+                    CnbLiveDeliveryRequirements(),
+                    missingListing,
+                )
+            }
+        assertEquals(404, failure.statusCode)
+    }
+
+    @Test
     fun `skips missing pull request details but propagates retryable API failures`() {
         val first = pullRequest("7", "team/project", "feature/missing", SHA_A)
         val second = pullRequest("8", "team/project", "feature/unavailable", SHA_B)
@@ -165,6 +207,155 @@ class CnbOpenPullRequestTargetPushResolverTest {
 
         assertEquals(503, thrown.statusCode)
         assertEquals(true, thrown.retryable)
+    }
+
+    @Test
+    fun `propagates authorization failures from authoritative pull request and source branch reads`() {
+        val pullRequest = pullRequest("7", "team/project", "feature/change", SHA_A)
+        val delegate =
+            client(
+                listed = listOf(pullRequest),
+                details = mapOf("7" to pullRequest),
+                branches =
+                    mapOf(
+                        "team/project:main" to CnbBranch("main", SHA_C),
+                        "team/project:feature/change" to CnbBranch("feature/change", SHA_A),
+                    ),
+            )
+        val deniedDetails =
+            object : CnbClient by delegate {
+                override fun getPullRequest(
+                    repo: String,
+                    number: String,
+                ): CnbPullRequest = throw CnbApiException("pull request denied", statusCode = 403)
+            }
+        val deniedSource =
+            object : CnbClient by delegate {
+                override fun getBranch(
+                    repo: String,
+                    branch: String,
+                ): CnbBranch {
+                    if (branch == "feature/change") {
+                        throw CnbApiException("source branch denied", statusCode = 401)
+                    }
+                    return delegate.getBranch(repo, branch)
+                }
+            }
+
+        val detailsFailure =
+            assertThrows(CnbApiException::class.java) {
+                CnbOpenPullRequestTargetPushResolver.resolve(
+                    targetPushDelivery(),
+                    CnbLiveDeliveryRequirements(),
+                    deniedDetails,
+                )
+            }
+        val sourceFailure =
+            assertThrows(CnbApiException::class.java) {
+                CnbOpenPullRequestTargetPushResolver.resolve(
+                    targetPushDelivery(),
+                    CnbLiveDeliveryRequirements(),
+                    deniedSource,
+                )
+            }
+
+        assertEquals(403, detailsFailure.statusCode)
+        assertEquals(401, sourceFailure.statusCode)
+    }
+
+    @Test
+    fun `commit policy fails open only for missing metadata and validates the returned revision`() {
+        val pullRequest = pullRequest("7", "team/project", "feature/change", SHA_A)
+        val delegate =
+            client(
+                listed = listOf(pullRequest),
+                details = mapOf("7" to pullRequest),
+                branches =
+                    mapOf(
+                        "team/project:main" to CnbBranch("main", SHA_C),
+                        "team/project:feature/change" to CnbBranch("feature/change", SHA_A),
+                    ),
+            )
+        val missing =
+            object : CnbClient by delegate {
+                override fun getCommit(
+                    repo: String,
+                    sha: String,
+                ): CnbCommit = throw CnbApiException("commit missing", statusCode = 404)
+            }
+        val denied =
+            object : CnbClient by delegate {
+                override fun getCommit(
+                    repo: String,
+                    sha: String,
+                ): CnbCommit = throw CnbApiException("commit denied", statusCode = 403)
+            }
+        val mismatched =
+            object : CnbClient by delegate {
+                override fun getCommit(
+                    repo: String,
+                    sha: String,
+                ): CnbCommit = CnbCommit(SHA_D, "wrong revision")
+            }
+
+        val resolved =
+            CnbOpenPullRequestTargetPushResolver.resolve(
+                targetPushDelivery(),
+                CnbLiveDeliveryRequirements(commitMessage = true),
+                missing,
+            )
+        assertEquals("", resolved.single().snapshot.commitMessage)
+
+        val authorizationFailure =
+            assertThrows(CnbApiException::class.java) {
+                CnbOpenPullRequestTargetPushResolver.resolve(
+                    targetPushDelivery(),
+                    CnbLiveDeliveryRequirements(commitMessage = true),
+                    denied,
+                )
+            }
+        val mismatchFailure =
+            assertThrows(CnbApiException::class.java) {
+                CnbOpenPullRequestTargetPushResolver.resolve(
+                    targetPushDelivery(),
+                    CnbLiveDeliveryRequirements(commitMessage = true),
+                    mismatched,
+                )
+            }
+        assertEquals(403, authorizationFailure.statusCode)
+        assertEquals(409, mismatchFailure.statusCode)
+        assertEquals(true, mismatchFailure.retryable)
+    }
+
+    @Test
+    fun `optional label authorization remains fail closed`() {
+        val pullRequest = pullRequest("7", "team/project", "feature/change", SHA_A)
+        val delegate =
+            client(
+                listed = listOf(pullRequest),
+                details = mapOf("7" to pullRequest),
+                branches =
+                    mapOf(
+                        "team/project:main" to CnbBranch("main", SHA_C),
+                        "team/project:feature/change" to CnbBranch("feature/change", SHA_A),
+                    ),
+            )
+        val deniedLabels =
+            object : CnbClient by delegate {
+                override fun listPullLabels(
+                    repo: String,
+                    number: String,
+                ): List<CnbLabel> = throw CnbApiException("labels denied", statusCode = 403)
+            }
+
+        val resolved =
+            CnbOpenPullRequestTargetPushResolver.resolve(
+                targetPushDelivery(),
+                CnbLiveDeliveryRequirements(labels = true),
+                deniedLabels,
+            )
+
+        assertEquals(null, resolved.single().snapshot.labels)
     }
 
     @Test

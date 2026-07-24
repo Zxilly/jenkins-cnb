@@ -87,7 +87,7 @@ internal object CnbLiveDeliveryResolver {
             return CnbLiveDeliverySnapshot(true, current, labels, commitMessage = commitMessage)
         }
         val comment =
-            failClosedLookup {
+            missingLookup {
                 getComment(delivery.payload.repository.slug, advertised.number, commentId)
             } ?: return CnbLiveDeliverySnapshot(true, current, labels, commitMessage = commitMessage)
         val commentVerified =
@@ -130,11 +130,22 @@ internal object CnbLiveDeliveryResolver {
                     .takeIf(CnbGitObjectId::isPresent)
                     ?.let { delivery.payload.repository.slug to it }
             } ?: return ""
-        return failClosedLookup {
-            getCommit(target.first, target.second)
-                .takeIf { commit -> commit.sha.equals(target.second, ignoreCase = true) }
-                ?.message
+        val commit =
+            try {
+                getCommit(target.first, target.second)
+            } catch (failure: CnbApiException) {
+                if (failure.statusCode != 404) throw failure
+                // Missing metadata cannot prove a skip marker; the verified revision still builds.
+                return ""
+            }
+        if (!commit.sha.equals(target.second, ignoreCase = true)) {
+            throw CnbApiException(
+                "CNB returned commit metadata for a different revision",
+                statusCode = 409,
+                retryable = true,
+            )
         }
+        return commit.message
     }
 
     private inline fun <T> failClosedLookup(block: () -> T): T? =
@@ -142,6 +153,14 @@ internal object CnbLiveDeliveryResolver {
             block()
         } catch (failure: CnbApiException) {
             if (failure.statusCode !in missingOrUnauthorizedStatusCodes) throw failure
+            null
+        }
+
+    private inline fun <T> missingLookup(block: () -> T): T? =
+        try {
+            block()
+        } catch (failure: CnbApiException) {
+            if (failure.statusCode != 404) throw failure
             null
         }
 

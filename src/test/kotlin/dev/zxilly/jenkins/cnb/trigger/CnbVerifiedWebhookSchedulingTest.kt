@@ -10,6 +10,7 @@ import dev.zxilly.jenkins.cnb.api.model.CnbMemberAccess
 import dev.zxilly.jenkins.cnb.api.model.CnbMemberAccessLevel
 import dev.zxilly.jenkins.cnb.api.model.CnbPullComment
 import dev.zxilly.jenkins.cnb.api.model.CnbPullRequest
+import dev.zxilly.jenkins.cnb.api.model.CnbPullRequestListState
 import dev.zxilly.jenkins.cnb.api.model.CnbPullRequestState
 import dev.zxilly.jenkins.cnb.api.model.CnbRepository
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryStatus
@@ -144,6 +145,37 @@ class CnbVerifiedWebhookSchedulingTest {
         val checkout = requireNotNull(candidate.checkoutAction)
         assertEquals(SHA_A, checkout.commit)
         assertTrue(checkout.canOriginateFrom((enabledJob.scm as GitSCM).repositories))
+    }
+
+    @Test
+    @WithJenkins
+    fun `classic target push retries a missing pull request listing after target verification`(jenkins: JenkinsRule) {
+        val job = jenkins.createFreeStyleProject("target-push-list-retry")
+        val trigger =
+            CnbPushTrigger("primary", "team/project", "**").apply {
+                setEventFilter("tag_push")
+                setTriggerOpenPullRequestOnPush("both")
+                setCiSkip(false)
+            }
+        val delegate = targetPushClient()
+        val client =
+            object : CnbClient by delegate {
+                override fun listPullRequests(
+                    repo: String,
+                    state: CnbPullRequestListState,
+                ): List<CnbPullRequest> = throw CnbApiException("pull request listing missing", statusCode = 404)
+            }
+
+        val failure =
+            assertThrows(CnbApiException::class.java) {
+                CnbVerifiedWebhookPlanner.classic(
+                    pushDelivery(),
+                    listOf(CnbClassicTriggerCandidate(job, trigger)),
+                    openClient = { client },
+                )
+            }
+
+        assertEquals(404, failure.statusCode)
     }
 
     @Test
@@ -373,6 +405,79 @@ class CnbVerifiedWebhookSchedulingTest {
             )
         assertEquals(listOf(job.fullName), planned.map { it.job.fullName })
         assertEquals(true, planned.single().onlyIfNewPullRequestCommits)
+    }
+
+    @Test
+    @WithJenkins
+    fun `classic CI skip fails open for missing commit metadata and retries authorization failures`(jenkins: JenkinsRule) {
+        val job = jenkins.createFreeStyleProject("skip-metadata-failure-policy")
+        val trigger = CnbPushTrigger("primary", "team/project", "main")
+        val missingCommit =
+            CnbVerifiedWebhookPlanner.classic(
+                pushDelivery(),
+                listOf(CnbClassicTriggerCandidate(job, trigger)),
+                openClient = {
+                    targetPushClient { _, _ ->
+                        throw CnbApiException("commit is not indexed yet", statusCode = 404)
+                    }
+                },
+            )
+
+        assertEquals(listOf(job.fullName), missingCommit.map { it.job.fullName })
+
+        val authorizationFailure =
+            assertThrows(CnbApiException::class.java) {
+                CnbVerifiedWebhookPlanner.classic(
+                    pushDelivery(),
+                    listOf(CnbClassicTriggerCandidate(job, trigger)),
+                    openClient = {
+                        targetPushClient { _, _ ->
+                            throw CnbApiException("credential was rejected", statusCode = 403)
+                        }
+                    },
+                )
+            }
+        assertEquals(403, authorizationFailure.statusCode)
+    }
+
+    @Test
+    @WithJenkins
+    fun `classic Git checkout retries missing and unauthorized repository metadata`(jenkins: JenkinsRule) {
+        val job = jenkins.createFreeStyleProject("checkout-metadata-failure-policy")
+        job.scm = GitSCM("https://cnb.cool/team/project.git")
+        val trigger = CnbPushTrigger("primary", "team/project", "main").apply { setCiSkip(false) }
+        val delegate = targetPushClient()
+
+        val authorizationFailure =
+            assertThrows(CnbApiException::class.java) {
+                CnbVerifiedWebhookPlanner.classic(
+                    pushDelivery(),
+                    listOf(CnbClassicTriggerCandidate(job, trigger)),
+                    openClient = {
+                        object : CnbClient by delegate {
+                            override fun getRepository(path: String): CnbRepository =
+                                throw CnbApiException("credential was rejected", statusCode = 403)
+                        }
+                    },
+                )
+            }
+
+        assertEquals(403, authorizationFailure.statusCode)
+
+        val missingFailure =
+            assertThrows(CnbApiException::class.java) {
+                CnbVerifiedWebhookPlanner.classic(
+                    pushDelivery(),
+                    listOf(CnbClassicTriggerCandidate(job, trigger)),
+                    openClient = {
+                        object : CnbClient by delegate {
+                            override fun getRepository(path: String): CnbRepository =
+                                throw CnbApiException("repository metadata missing", statusCode = 404)
+                        }
+                    },
+                )
+            }
+        assertEquals(404, missingFailure.statusCode)
     }
 
     @Test
@@ -796,67 +901,84 @@ class CnbVerifiedWebhookSchedulingTest {
 
     private fun targetPushClient(
         pullRequests: List<CnbPullRequest> = listOf(livePullRequest().copy(sourceRepo = "alice/project")),
-    ): CnbClient =
-        Proxy.newProxyInstance(
-            CnbClient::class.java.classLoader,
-            arrayOf(CnbClient::class.java),
-        ) { _, method, arguments ->
-            val args = arguments.orEmpty()
-            when (method.name) {
-                "getCapabilities" -> {
-                    CnbApiCapabilities()
-                }
+        commitLookup: ((String, String) -> CnbCommit)? = null,
+    ): CnbClient {
+        val delegate =
+            Proxy.newProxyInstance(
+                CnbClient::class.java.classLoader,
+                arrayOf(CnbClient::class.java),
+            ) { _, method, arguments ->
+                val args = arguments.orEmpty()
+                when (method.name) {
+                    "getCapabilities" -> {
+                        CnbApiCapabilities()
+                    }
 
-                "getBranch" -> {
-                    val repository = args[0].toString()
-                    val branch = args[1].toString()
-                    if (repository == "team/project" && branch == "main") {
-                        CnbBranch("main", SHA_C)
-                    } else {
+                    "getBranch" -> {
+                        val repository = args[0].toString()
+                        val branch = args[1].toString()
+                        if (repository == "team/project" && branch == "main") {
+                            CnbBranch("main", SHA_C)
+                        } else {
+                            pullRequests
+                                .firstOrNull { pullRequest ->
+                                    pullRequest.sourceRepo == repository && pullRequest.sourceBranch == branch
+                                }?.let { pullRequest -> CnbBranch(branch, pullRequest.sourceSha) }
+                                ?: throw UnsupportedOperationException("unexpected branch ${args.toList()}")
+                        }
+                    }
+
+                    "listPullRequests" -> {
                         pullRequests
-                            .firstOrNull { pullRequest ->
-                                pullRequest.sourceRepo == repository && pullRequest.sourceBranch == branch
-                            }?.let { pullRequest -> CnbBranch(branch, pullRequest.sourceSha) }
-                            ?: throw UnsupportedOperationException("unexpected branch ${args.toList()}")
+                    }
+
+                    "getPullRequest" -> {
+                        val number = args[1].toString()
+                        pullRequests.firstOrNull { it.number == number }
+                            ?: throw CnbApiException("pull request missing", statusCode = 404)
+                    }
+
+                    "getCommit" -> {
+                        throw UnsupportedOperationException(method.name)
+                    }
+
+                    "getRepository" -> {
+                        val path = args[0] as String
+                        CnbRepository(
+                            path = path,
+                            name = path.substringAfterLast('/'),
+                            webUrl = "https://cnb.cool/$path",
+                            cloneUrl = "https://cnb.cool/$path.git",
+                            defaultBranch = "main",
+                            status = CnbRepositoryStatus.OK,
+                            visibility = CnbRepositoryVisibility.PUBLIC,
+                        )
+                    }
+
+                    "close" -> {
+                        Unit
+                    }
+
+                    "toString" -> {
+                        "CnbVerifiedWebhookSchedulingTargetPushClient"
+                    }
+
+                    else -> {
+                        throw UnsupportedOperationException(method.name)
                     }
                 }
-
-                "listPullRequests" -> {
-                    pullRequests
-                }
-
-                "getPullRequest" -> {
-                    val number = args[1].toString()
-                    pullRequests.firstOrNull { it.number == number }
-                        ?: throw CnbApiException("pull request missing", statusCode = 404)
-                }
-
-                "getRepository" -> {
-                    val path = args[0] as String
-                    CnbRepository(
-                        path = path,
-                        name = path.substringAfterLast('/'),
-                        webUrl = "https://cnb.cool/$path",
-                        cloneUrl = "https://cnb.cool/$path.git",
-                        defaultBranch = "main",
-                        status = CnbRepositoryStatus.OK,
-                        visibility = CnbRepositoryVisibility.PUBLIC,
-                    )
-                }
-
-                "close" -> {
-                    Unit
-                }
-
-                "toString" -> {
-                    "CnbVerifiedWebhookSchedulingTargetPushClient"
-                }
-
-                else -> {
-                    throw UnsupportedOperationException(method.name)
-                }
+            } as CnbClient
+        return if (commitLookup == null) {
+            delegate
+        } else {
+            object : CnbClient by delegate {
+                override fun getCommit(
+                    repo: String,
+                    sha: String,
+                ): CnbCommit = commitLookup(repo, sha)
             }
-        } as CnbClient
+        }
+    }
 
     private fun commentClient(
         author: String,

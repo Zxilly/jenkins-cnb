@@ -1,5 +1,6 @@
 package dev.zxilly.jenkins.cnb.trigger
 
+import dev.zxilly.jenkins.cnb.api.CnbApiException
 import dev.zxilly.jenkins.cnb.api.CnbClient
 import dev.zxilly.jenkins.cnb.api.model.CnbApiCapabilities
 import dev.zxilly.jenkins.cnb.api.model.CnbBranch
@@ -11,6 +12,7 @@ import dev.zxilly.jenkins.cnb.api.model.CnbMemberAccess
 import dev.zxilly.jenkins.cnb.api.model.CnbMemberAccessLevel
 import dev.zxilly.jenkins.cnb.api.model.CnbPullComment
 import dev.zxilly.jenkins.cnb.api.model.CnbPullRequest
+import dev.zxilly.jenkins.cnb.api.model.CnbPullRequestListState
 import dev.zxilly.jenkins.cnb.api.model.CnbPullRequestState
 import dev.zxilly.jenkins.cnb.api.model.CnbRepository
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryStatus
@@ -44,6 +46,7 @@ import org.jenkinsci.plugins.workflow.job.WorkflowJob
 import org.jenkinsci.plugins.workflow.multibranch.WorkflowMultiBranchProject
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.jvnet.hudson.test.JenkinsRule
@@ -53,6 +56,65 @@ import java.time.Instant
 
 @WithJenkins
 class CnbPullRequestCommentSchedulingIntegrationTest {
+    @Test
+    fun `multibranch webhook planning retries core authorization failures`(jenkins: JenkinsRule) {
+        val project =
+            jenkins.jenkins.createProject(
+                WorkflowMultiBranchProject::class.java,
+                "authorization-retry",
+            )
+        val source =
+            TestCnbSCMSource {
+                throw CnbApiException("source credential was rejected", statusCode = 403)
+            }
+        source.withId("authorization-retry-source")
+        source.setTraits(
+            listOf(
+                CnbOriginPullRequestDiscoveryTrait(2),
+                CnbPullRequestCommentTriggerTrait("rebuild"),
+            ),
+        )
+        project.sourcesList.add(BranchSource(source))
+        source.setOwner(project)
+
+        val targetPushFailure =
+            assertThrows(CnbApiException::class.java) {
+                CnbVerifiedWebhookPlanner.targetPushPullRequests(pushDelivery()) { _, _ ->
+                    throw CnbApiException("target push credential was rejected", statusCode = 401)
+                }
+            }
+        assertEquals(401, targetPushFailure.statusCode)
+
+        val targetPushListingFailure =
+            assertThrows(CnbApiException::class.java) {
+                CnbVerifiedWebhookPlanner.targetPushPullRequests(pushDelivery()) { _, _ ->
+                    object : CnbClient by targetPushClient() {
+                        override fun listPullRequests(
+                            repo: String,
+                            state: CnbPullRequestListState,
+                        ): List<CnbPullRequest> = throw CnbApiException("target push listing is temporarily missing", statusCode = 404)
+                    }
+                }
+            }
+        assertEquals(404, targetPushListingFailure.statusCode)
+
+        val commentVerificationFailure =
+            assertThrows(CnbApiException::class.java) {
+                CnbVerifiedWebhookPlanner.pullRequestComment(commentDelivery()) { _, _ ->
+                    throw CnbApiException("comment credential was rejected", statusCode = 403)
+                }
+            }
+        assertEquals(403, commentVerificationFailure.statusCode)
+
+        val discoveryFailure =
+            assertThrows(CnbApiException::class.java) {
+                CnbVerifiedWebhookPlanner.pullRequestComment(commentDelivery()) { _, _ ->
+                    liveCommentClient()
+                }
+            }
+        assertEquals(403, discoveryFailure.statusCode)
+    }
+
     @Test
     fun `target branch push advertises verified pull request revisions only to opted in multibranch sources`(jenkins: JenkinsRule) {
         val project =
