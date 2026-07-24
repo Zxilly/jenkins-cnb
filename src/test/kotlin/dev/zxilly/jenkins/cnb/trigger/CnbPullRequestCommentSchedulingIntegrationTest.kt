@@ -116,6 +116,7 @@ class CnbPullRequestCommentSchedulingIntegrationTest {
             )
         val branch = Branch(source.id, head, NullSCM(), emptyList())
         val job: WorkflowJob = project.projectFactory.newInstance(branch)
+        job.onCreatedFromScratch()
         job.definition = CpsFlowDefinition("echo 'comment build'", true)
         job.save()
         // BranchProjectFactory.newInstance only constructs a child with this project as its
