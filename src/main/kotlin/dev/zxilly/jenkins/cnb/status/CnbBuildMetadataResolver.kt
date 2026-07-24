@@ -169,7 +169,11 @@ internal object CnbBuildMetadataResolver {
             }
 
     private fun revisionMetadata(actionable: Actionable): Metadata {
-        val revision = actionable.getAction(SCMRevisionAction::class.java)?.revision ?: return Metadata()
+        val revision =
+            actionable.actions
+                .filterIsInstance<SCMRevisionAction>()
+                .firstOrNull()
+                ?.revision ?: return Metadata()
         return when (revision) {
             is CnbPullRequestSCMRevision -> {
                 Metadata(
