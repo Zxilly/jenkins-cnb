@@ -105,7 +105,12 @@ object CnbRunContextResolver {
                 ?.takeIf(SHA_PATTERN::matches)
                 ?: first(explicit.sha, event.sha, scm.sha)
                     ?.let { throw AbortException("CNB commit SHA must contain 7-64 hexadecimal characters") }
-        val credentialsId = first(explicit.credentialsId, event.credentialsId, scm.credentialsId)
+        val credentialsId =
+            first(
+                explicit.credentialsId,
+                event.credentialsId?.takeIf { event.serverId == serverId },
+                scm.credentialsId?.takeIf { scm.serverId == serverId },
+            )
 
         return CnbRunContext(serverId, repository, pullRequestNumber, sha, credentialsId)
     }

@@ -2,15 +2,21 @@ package dev.zxilly.jenkins.cnb.trigger
 
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
+import dev.zxilly.jenkins.cnb.api.model.CnbCommit
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryEvent
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryEventPayload
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryEventType
+import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryRefType
 import dev.zxilly.jenkins.cnb.config.CnbGlobalConfiguration
 import dev.zxilly.jenkins.cnb.config.CnbServer
 import dev.zxilly.jenkins.cnb.health.CnbHealthComponent
 import dev.zxilly.jenkins.cnb.health.CnbOperationalHealth
 import dev.zxilly.jenkins.cnb.scm.CnbSCMSource
+import hudson.model.Action
+import hudson.model.Queue
 import hudson.model.TaskListener
+import hudson.plugins.git.GitSCM
+import hudson.plugins.git.RevisionParameterAction
 import hudson.util.StreamTaskListener
 import jenkins.branch.BranchSource
 import org.jenkinsci.plugins.workflow.multibranch.WorkflowMultiBranchProject
@@ -30,10 +36,377 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 @WithJenkins
 class CnbRepositoryEventPollingWorkIntegrationTest {
+    @Test
+    fun `polling converges with the latest webhook revision but permits A to B to A`(jenkins: JenkinsRule) {
+        val project = jenkins.createFreeStyleProject("cross-channel-history")
+        val trigger = CnbPushTrigger("primary", "team/project", "main").apply { setCiSkip(false) }
+        val shaA = "a".repeat(40)
+        val shaB = "b".repeat(40)
+
+        fun identity(sha: String) = CnbQueueIdentity("primary", "team/project", "refs/heads/main", sha)
+
+        fun event(
+            id: String,
+            sha: String,
+        ) = repositoryEvent("team/project", id).copy(payload = CnbRepositoryEventPayload(ref = "refs/heads/main", head = sha))
+
+        jenkins.assertBuildStatusSuccess(
+            project.scheduleBuild2(0, CnbQueueAction(identity(shaA), "webhook-a")),
+        )
+        CnbPushTriggerRecovery.recover("primary", "team/project", listOf(event("poll-a-duplicate", shaA)), project, trigger)
+        jenkins.waitUntilNoActivity()
+        assertEquals(1, project.builds.count())
+
+        jenkins.assertBuildStatusSuccess(
+            project.scheduleBuild2(0, CnbQueueAction(identity(shaB), "webhook-b")),
+        )
+        CnbPushTriggerRecovery.recover("primary", "team/project", listOf(event("poll-a-return", shaA)), project, trigger)
+        jenkins.waitUntilNoActivity()
+
+        assertEquals(3, project.builds.count())
+        assertEquals(shaA, requireNotNull(requireNotNull(project.lastBuild).getAction(CnbQueueAction::class.java)).sha)
+    }
+
+    @Test
+    fun `late delete in a second archive poll reschedules the acknowledged recreation`(jenkins: JenkinsRule) {
+        val project = jenkins.createFreeStyleProject("late-delete-recovery")
+        val trigger = CnbPushTrigger("primary", "team/project", "main").apply { setCiSkip(false) }
+        val sha = "a".repeat(40)
+        val first =
+            repositoryEvent("team/project", "1").copy(
+                createdAt = "2026-07-15T10:15:00Z",
+                payload = CnbRepositoryEventPayload(ref = "refs/heads/main", head = sha),
+            )
+        val lateDelete =
+            CnbRepositoryEvent(
+                id = "2",
+                type = CnbRepositoryEventType("DeleteEvent"),
+                repositoryPath = "team/project",
+                createdAt = "2026-07-15T10:16:00Z",
+                payload = CnbRepositoryEventPayload(ref = "main", refType = CnbRepositoryRefType.BRANCH),
+            )
+        val recreated = first.copy(id = "3", createdAt = "2026-07-15T10:17:00Z")
+        val stateDirectory = Files.createTempDirectory("cnb-late-delete")
+        val dedupStore = CnbRepositoryEventDedupStore(stateDirectory.resolve("dedup.journal"))
+        val lifecycleStore = CnbRefLifecycleStore(stateDirectory.resolve("lifecycle.journal"))
+        val dedupScope =
+            CnbRepositoryEventStateScope(
+                "primary",
+                "team/project",
+                SERVER_AUTHORIZATION_SCOPE,
+                classicJobEventConsumerScope(project),
+            )
+        val now = Instant.parse("2026-07-15T10:30:00Z")
+
+        fun poll(events: List<CnbRepositoryEvent>): Int =
+            CnbRepositoryEventHourProcessor.process(
+                dedupScope,
+                events,
+                now,
+                dedupStore,
+            ) { recovered ->
+                CnbPushTriggerRecovery.recover(
+                    "primary",
+                    "team/project",
+                    recovered,
+                    project,
+                    trigger,
+                    lifecycleStore = lifecycleStore,
+                )
+            }
+
+        assertEquals(1, poll(listOf(first)))
+        jenkins.waitUntilNoActivity()
+        assertEquals(1, project.builds.count())
+        val initial = requireNotNull(project.lastBuild)
+        assertEquals(0L, requireNotNull(initial.getAction(CnbQueueAction::class.java)).identity.refGeneration)
+        assertEquals("1", requireNotNull(initial.getCause(CnbRepositoryEventCause::class.java)).eventId)
+
+        assertEquals(1, poll(listOf(first, recreated)))
+        jenkins.waitUntilNoActivity()
+        assertEquals(1, project.builds.count(), "same SHA and generation must acknowledge t3 without rebuilding")
+        assertEquals("1", requireNotNull(project.lastBuild?.getCause(CnbRepositoryEventCause::class.java)).eventId)
+
+        assertEquals(1, poll(listOf(first, lateDelete, recreated)))
+        jenkins.waitUntilNoActivity()
+
+        assertEquals(2, project.builds.count())
+        val rebuilt = requireNotNull(project.lastBuild)
+        val action = requireNotNull(rebuilt.getAction(CnbQueueAction::class.java))
+        assertEquals(sha, action.sha)
+        assertEquals(1L, action.identity.refGeneration)
+        assertEquals("3", requireNotNull(rebuilt.getCause(CnbRepositoryEventCause::class.java)).eventId)
+    }
+
+    @Test
+    fun `production replay combines a late completed-hour delete with an acknowledged current-hour recreation`(jenkins: JenkinsRule) {
+        val currentHour = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.HOURS)
+        val completedHour = currentHour.minusSeconds(3_600)
+        val includeLateDelete = AtomicBoolean()
+        val api =
+            startApi { exchange ->
+                if (!exchange.requestURI.path.startsWith("/events/team/project/")) {
+                    respond(exchange, 404, "{}")
+                    return@startApi
+                }
+                val body =
+                    when (hourFromRequest(exchange.requestURI.path)) {
+                        currentHour -> {
+                            pushEvents(
+                                "team/project",
+                                "cross-hour-recreation",
+                                currentHour.toString(),
+                            )
+                        }
+
+                        completedHour -> {
+                            if (includeLateDelete.get()) {
+                                deleteEvents(
+                                    "team/project",
+                                    "cross-hour-late-delete",
+                                    completedHour.plusSeconds(3_599).toString(),
+                                )
+                            } else {
+                                "[]"
+                            }
+                        }
+
+                        else -> {
+                            "[]"
+                        }
+                    }
+                respond(exchange, 200, body)
+            }
+        try {
+            configureServer(api)
+            val project = jenkins.createFreeStyleProject("cross-hour-late-delete")
+            project.addTrigger(CnbPushTrigger("primary", "team/project", "main").apply { setCiSkip(false) })
+
+            CnbRepositoryEventPollingWork(CnbOperationalHealth()).runOnce(TaskListener.NULL)
+            jenkins.waitUntilNoActivity()
+            assertEquals(1, project.builds.count())
+            assertEquals(
+                0L,
+                requireNotNull(project.lastBuild?.getAction(CnbQueueAction::class.java)).identity.refGeneration,
+            )
+
+            includeLateDelete.set(true)
+            CnbRepositoryEventPollingWork(CnbOperationalHealth()).runOnce(TaskListener.NULL)
+            jenkins.waitUntilNoActivity()
+
+            assertEquals(2, project.builds.count())
+            val rebuilt = requireNotNull(project.lastBuild)
+            assertEquals(
+                1L,
+                requireNotNull(rebuilt.getAction(CnbQueueAction::class.java)).identity.refGeneration,
+            )
+            assertEquals(
+                "cross-hour-recreation",
+                requireNotNull(rebuilt.getCause(CnbRepositoryEventCause::class.java)).eventId,
+            )
+        } finally {
+            api.stop(0)
+        }
+    }
+
+    @Test
+    fun `classic polling recovery honors CI skip and pins a matching GitSCM revision`(jenkins: JenkinsRule) {
+        jenkins.jenkins.numExecutors = 0
+        val project = jenkins.createFreeStyleProject("classic-policy-recovery")
+        project.scm = GitSCM("https://cnb.cool/team/project.git")
+        val trigger = CnbPushTrigger("primary", "team/project", "main")
+        val event = repositoryEvent("team/project", "policy-event")
+
+        CnbPushTriggerRecovery.recover(
+            "primary",
+            "team/project",
+            listOf(event),
+            project,
+            trigger,
+            getCommit = { _, sha -> CnbCommit(sha, "do not recover [skip ci]") },
+            loadSourceCloneUrl = { "https://cnb.cool/team/project" },
+        )
+        assertTrue(Queue.getInstance().items.isEmpty())
+
+        CnbPushTriggerRecovery.recover(
+            "primary",
+            "team/project",
+            listOf(event),
+            project,
+            trigger,
+            getCommit = { _, sha -> CnbCommit(sha, "recover this revision") },
+            loadSourceCloneUrl = { "https://cnb.cool/team/other" },
+        )
+        assertTrue(Queue.getInstance().items.isEmpty(), "A GitSCM job must not run without a trusted revision action")
+
+        CnbPushTriggerRecovery.recover(
+            "primary",
+            "team/project",
+            listOf(event),
+            project,
+            trigger,
+            getCommit = { _, sha -> CnbCommit(sha, "recover this revision") },
+            loadSourceCloneUrl = {
+                val executor = Executors.newSingleThreadExecutor()
+                try {
+                    executor
+                        .submit { Queue.withLock(Runnable {}) }
+                        .get(5, TimeUnit.SECONDS)
+                    "https://cnb.cool/team/project"
+                } finally {
+                    executor.shutdownNow()
+                }
+            },
+        )
+
+        val queued = Queue.getInstance().items.single()
+        assertEquals(COMMIT, requireNotNull(queued.getAction(RevisionParameterAction::class.java)).commit)
+        assertEquals(COMMIT, requireNotNull(queued.getAction(CnbQueueAction::class.java)).sha)
+        Queue.getInstance().cancel(queued)
+    }
+
+    @Test
+    fun `queue refusal leaves a recovered event available for retry`(jenkins: JenkinsRule) {
+        val api = startApi { exchange -> respond(exchange, 200, pushEvents("team/project", "retry-event")) }
+        val veto =
+            object : Queue.QueueDecisionHandler() {
+                override fun shouldSchedule(
+                    task: Queue.Task,
+                    actions: MutableList<Action>,
+                ): Boolean = false
+            }
+        try {
+            configureServer(api)
+            val project = jenkins.createFreeStyleProject("classic-retry")
+            project.addTrigger(CnbPushTrigger("primary", "team/project", "main").apply { setCiSkip(false) })
+            Queue.QueueDecisionHandler.all().add(veto)
+
+            CnbRepositoryEventPollingWork(CnbOperationalHealth()).runOnce(TaskListener.NULL)
+            jenkins.waitUntilNoActivity()
+            assertNull(project.lastBuild)
+
+            Queue.QueueDecisionHandler.all().remove(veto)
+            CnbRepositoryEventPollingWork(CnbOperationalHealth()).runOnce(TaskListener.NULL)
+            jenkins.waitUntilNoActivity()
+
+            val build = requireNotNull(project.lastBuild)
+            assertEquals("retry-event", requireNotNull(build.getCause(CnbRepositoryEventCause::class.java)).eventId)
+        } finally {
+            Queue.QueueDecisionHandler.all().remove(veto)
+            api.stop(0)
+        }
+    }
+
+    @Test
+    fun `temporary commit authorization failure leaves archive recovery retryable`(jenkins: JenkinsRule) {
+        val commitLookups = AtomicInteger()
+        val api =
+            startApi { exchange ->
+                when {
+                    exchange.requestURI.path.startsWith("/events/team/project/") -> {
+                        respond(exchange, 200, pushEvents("team/project", "authorization-retry-event"))
+                    }
+
+                    exchange.requestURI.path.contains("/-/git/commits/") -> {
+                        if (commitLookups.incrementAndGet() == 1) {
+                            respond(exchange, 403, "{}")
+                        } else {
+                            respond(
+                                exchange,
+                                200,
+                                """{"sha":"$COMMIT","commit":{"message":"recover after credentials are fixed"}}""",
+                            )
+                        }
+                    }
+
+                    else -> {
+                        respond(exchange, 404, "{}")
+                    }
+                }
+            }
+        try {
+            configureServer(api)
+            val project = jenkins.createFreeStyleProject("classic-authorization-retry")
+            project.addTrigger(CnbPushTrigger("primary", "team/project", "main").apply { setCiSkip(true) })
+
+            CnbRepositoryEventPollingWork(CnbOperationalHealth()).runOnce(TaskListener.NULL)
+            jenkins.waitUntilNoActivity()
+            assertNull(project.lastBuild)
+
+            CnbRepositoryEventPollingWork(CnbOperationalHealth()).runOnce(TaskListener.NULL)
+            jenkins.waitUntilNoActivity()
+
+            val build = requireNotNull(project.lastBuild)
+            assertEquals(
+                "authorization-retry-event",
+                requireNotNull(build.getCause(CnbRepositoryEventCause::class.java)).eventId,
+            )
+            assertEquals(2, commitLookups.get())
+        } finally {
+            api.stop(0)
+        }
+    }
+
+    @Test
+    fun `temporary repository not found leaves classic checkout recovery retryable`(jenkins: JenkinsRule) {
+        jenkins.jenkins.numExecutors = 0
+        val repositoryLookups = AtomicInteger()
+        val api =
+            startApi { exchange ->
+                when {
+                    exchange.requestURI.path.startsWith("/events/team/project/") -> {
+                        respond(exchange, 200, pushEvents("team/project", "repository-retry-event"))
+                    }
+
+                    exchange.requestURI.path == "/team/project" -> {
+                        if (repositoryLookups.incrementAndGet() == 1) {
+                            respond(exchange, 404, "{}")
+                        } else {
+                            val webUrl = "http://127.0.0.1:${exchange.localAddress.port}/team/project"
+                            respond(
+                                exchange,
+                                200,
+                                """{"id":"42","path":"team/project","name":"project","web_url":"$webUrl","visibility_level":"Private","status":"active"}""",
+                            )
+                        }
+                    }
+
+                    exchange.requestURI.path == "/team/project/-/git/head" -> {
+                        respond(exchange, 200, """{"name":"refs/heads/main"}""")
+                    }
+
+                    else -> {
+                        respond(exchange, 404, "{}")
+                    }
+                }
+            }
+        try {
+            configureServer(api, webEndpoint = "https://cnb.example")
+            val project = jenkins.createFreeStyleProject("classic-repository-retry")
+            project.scm = GitSCM("https://cnb.example/team/project")
+            project.addTrigger(CnbPushTrigger("primary", "team/project", "main").apply { setCiSkip(false) })
+
+            CnbRepositoryEventPollingWork(CnbOperationalHealth()).runOnce(TaskListener.NULL)
+            assertTrue(Queue.getInstance().items.isEmpty())
+
+            CnbRepositoryEventPollingWork(CnbOperationalHealth()).runOnce(TaskListener.NULL)
+
+            assertEquals(2, repositoryLookups.get(), "the failed archive event must be polled again")
+            val queued = Queue.getInstance().items.single()
+            assertEquals(COMMIT, requireNotNull(queued.getAction(RevisionParameterAction::class.java)).commit)
+            Queue.getInstance().cancel(queued)
+        } finally {
+            api.stop(0)
+        }
+    }
+
     @Test
     fun `production polling recovers a classic job and persists cursor and dedup state`(jenkins: JenkinsRule) {
         val requests = CopyOnWriteArrayList<String>()
@@ -47,7 +420,7 @@ class CnbRepositoryEventPollingWorkIntegrationTest {
         try {
             configureServer(api)
             val project = jenkins.createFreeStyleProject("classic-polling")
-            project.addTrigger(CnbPushTrigger("primary", "team/project", "main"))
+            project.addTrigger(CnbPushTrigger("primary", "team/project", "main").apply { setCiSkip(false) })
             val work = CnbRepositoryEventPollingWork(CnbOperationalHealth())
 
             assertEquals(60_000L, work.getRecurrencePeriod())
@@ -130,9 +503,9 @@ class CnbRepositoryEventPollingWorkIntegrationTest {
         try {
             configureServer(api)
             val broken = jenkins.createFreeStyleProject("broken-polling")
-            broken.addTrigger(CnbPushTrigger("primary", "team/broken", "main"))
+            broken.addTrigger(CnbPushTrigger("primary", "team/broken", "main").apply { setCiSkip(false) })
             val healthy = jenkins.createFreeStyleProject("healthy-polling")
-            healthy.addTrigger(CnbPushTrigger("primary", "team/healthy", "main"))
+            healthy.addTrigger(CnbPushTrigger("primary", "team/healthy", "main").apply { setCiSkip(false) })
             val output = ByteArrayOutputStream()
             val listener = StreamTaskListener(output, StandardCharsets.UTF_8)
 
@@ -221,9 +594,12 @@ class CnbRepositoryEventPollingWorkIntegrationTest {
         assertTrue(candidate.itemScoped)
     }
 
-    private fun configureServer(api: HttpServer) {
+    private fun configureServer(
+        api: HttpServer,
+        webEndpoint: String = "http://127.0.0.1:${api.address.port}",
+    ) {
         val endpoint = "http://127.0.0.1:${api.address.port}"
-        val server = CnbServer("primary", "Primary", endpoint, endpoint)
+        val server = CnbServer("primary", "Primary", webEndpoint, endpoint)
         server.setAllowInsecureHttp(true)
         server.setAllowPrivateNetwork(true)
         server.setEventPollingEnabled(true)
@@ -251,15 +627,33 @@ class CnbRepositoryEventPollingWorkIntegrationTest {
     private fun pushEvents(
         repository: String,
         id: String,
+        createdAt: String = "2026-07-15T10:15:00Z",
     ): String =
         """
         [
           {
             "id": "$id",
             "type": "PushEvent",
-            "created_at": "2026-07-15T10:15:00Z",
+            "created_at": "$createdAt",
             "repo": {"path": "$repository"},
             "payload": {"ref": "refs/heads/main", "head": "$COMMIT"}
+          }
+        ]
+        """.trimIndent()
+
+    private fun deleteEvents(
+        repository: String,
+        id: String,
+        createdAt: String,
+    ): String =
+        """
+        [
+          {
+            "id": "$id",
+            "type": "DeleteEvent",
+            "created_at": "$createdAt",
+            "repo": {"path": "$repository"},
+            "payload": {"ref": "main", "ref_type": "branch"}
           }
         ]
         """.trimIndent()

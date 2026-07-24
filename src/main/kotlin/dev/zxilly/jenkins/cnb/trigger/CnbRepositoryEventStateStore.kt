@@ -17,10 +17,37 @@ import java.time.DateTimeException
 import java.time.Duration
 import java.time.Instant
 import java.time.temporal.ChronoUnit
+import java.util.Base64
 import java.util.HexFormat
 import java.util.LinkedHashMap
 import java.util.PriorityQueue
 import java.util.Properties
+
+internal data class CnbRefLifecycleTransition(
+    val qualifiedRef: String,
+    val present: Boolean,
+    val occurredAt: Instant,
+    val stableEventId: String,
+) {
+    init {
+        require(qualifiedRef.startsWith("refs/heads/") || qualifiedRef.startsWith("refs/tags/")) {
+            "ref lifecycle transition must identify a branch or tag"
+        }
+        require(isValidLifecycleEventId(stableEventId)) { "ref lifecycle event ID is invalid" }
+    }
+}
+
+internal data class CnbScopedRefLifecycleTransition(
+    val scope: CnbRepositoryEventStateScope,
+    val transition: CnbRefLifecycleTransition,
+)
+
+internal data class CnbRefLifecycleResult(
+    val generation: Long,
+    val present: Boolean,
+    /** True when the input identifies the latest marker after it is applied. */
+    val current: Boolean,
+)
 
 /** Stable, hash-only persistence scope for one authorized repository-event consumer. */
 internal data class CnbRepositoryEventStateScope(
@@ -34,6 +61,395 @@ internal data class CnbRepositoryEventStateScope(
         require(repositoryPath.isNotBlank()) { "repository-event repository scope must not be blank" }
         require(authorizationScope.isNotBlank()) { "repository-event authorization scope must not be blank" }
         require(consumerScope.isNotBlank()) { "repository-event consumer scope must not be blank" }
+    }
+}
+
+/**
+ * Durable incarnation state for classic-job refs.
+ *
+ * A deletion has no Run to carry a receipt, so revision history alone cannot distinguish a ref
+ * recreated at the same object ID. The generation advances only for deleted-to-present
+ * transitions. Ordered markers let a late event repair newer generations. Per-ref and global
+ * marker bounds evict whole timelines above a persisted generation floor, which keeps pressure
+ * degradation monotonic without truncating history that a later insertion could still separate.
+ * Ordering by the validated event timestamp and stable event key makes archive replay independent
+ * of API response order and webhook/poll convergence idempotent.
+ */
+internal class CnbRefLifecycleStore(
+    private val path: Path,
+    private val capacity: Int = DEFAULT_REF_LIFECYCLE_CAPACITY,
+    maxJournalBytes: Long = DEFAULT_JOURNAL_BYTES,
+    compactionThreshold: Int = DEFAULT_COMPACTION_THRESHOLD,
+    beforePersistence: () -> Unit = {},
+    forceNonAtomicMove: Boolean = false,
+    private val markerCapacity: Int = DEFAULT_REF_LIFECYCLE_MARKER_CAPACITY,
+    private val perRefMarkerCapacity: Int = DEFAULT_PER_REF_LIFECYCLE_MARKER_CAPACITY,
+) {
+    private data class LifecycleEntry(
+        val present: Boolean,
+        val generation: Long,
+        val occurredAt: Instant,
+        val stableEventId: String,
+    )
+
+    private data class LifecycleTimeline(
+        val markers: List<LifecycleEntry>,
+    ) {
+        init {
+            require(markers.isNotEmpty()) { "ref lifecycle timeline must not be empty" }
+        }
+
+        val current: LifecycleEntry
+            get() = markers.last()
+    }
+
+    private data class TimelineUpdate(
+        val timeline: LifecycleTimeline,
+        val inserted: LifecycleEntry?,
+        val inputCurrent: Boolean,
+    )
+
+    private data class LifecycleRecord(
+        val operation: Operation,
+        val refScopeHash: String,
+        val present: Boolean,
+        val generation: Long,
+        val epochSecond: Long,
+        val nano: Int,
+        val stableEventId: String,
+    )
+
+    private enum class Operation(
+        val code: String,
+    ) {
+        SET("S"),
+        DELETE("D"),
+        FLOOR("F"),
+    }
+
+    private val entries = LinkedHashMap<String, LifecycleTimeline>()
+    private var markerCount = 0
+    private var generationFloor = 0L
+    private val journal =
+        AppendOnlyStateJournal(
+            path = path,
+            magic = REF_LIFECYCLE_MAGIC,
+            maxJournalBytes = maxJournalBytes,
+            compactionThreshold = compactionThreshold,
+            encode = ::encode,
+            decode = ::decode,
+            snapshot = ::snapshot,
+            beforePersistence = beforePersistence,
+            forceNonAtomicMove = forceNonAtomicMove,
+        )
+
+    init {
+        require(capacity > 0) { "ref lifecycle capacity must be positive" }
+        require(markerCapacity > 0) { "ref lifecycle marker capacity must be positive" }
+        require(perRefMarkerCapacity > 0) { "per-ref lifecycle marker capacity must be positive" }
+        val loaded = journal.load(loadLegacy = { false }, apply = ::applyLoaded)
+        val adjusted = enforceCapacity()
+        if (loaded.legacy || loaded.capacityAdjusted || loaded.needsCompaction || adjusted) journal.compact()
+    }
+
+    /** Applies a delivery batch atomically and returns the resulting state for each input transition. */
+    @Synchronized
+    fun apply(transitions: List<CnbScopedRefLifecycleTransition>): List<CnbRefLifecycleResult> {
+        if (transitions.isEmpty()) return emptyList()
+        val originals = LinkedHashMap<String, LifecycleTimeline?>()
+        val originalMarkerCount = markerCount
+        val originalGenerationFloor = generationFloor
+        val records = ArrayList<LifecycleRecord>(transitions.size)
+        val results = ArrayList<CnbRefLifecycleResult>(transitions.size)
+        var oversizedTimeline = false
+
+        fun remember(key: String) {
+            if (!originals.containsKey(key)) originals[key] = entries[key]
+        }
+
+        fun rollback(failure: Exception): Nothing {
+            for ((key, original) in originals) {
+                if (original == null) entries.remove(key) else entries[key] = original
+            }
+            markerCount = originalMarkerCount
+            generationFloor = originalGenerationFloor
+            throw failure
+        }
+
+        try {
+            for ((scope, transition) in transitions) {
+                val key = refScopeHash(scope, transition.qualifiedRef)
+                val previous = entries[key]
+                val update =
+                    insertMarker(
+                        previous,
+                        LifecycleEntry(
+                            present = transition.present,
+                            generation = generationFloor,
+                            occurredAt = transition.occurredAt,
+                            stableEventId = transition.stableEventId,
+                        ),
+                        generationFloor,
+                    )
+                val inserted = update.inserted
+                if (inserted == null) {
+                    val current = update.timeline.current
+                    results +=
+                        CnbRefLifecycleResult(
+                            current.generation,
+                            current.present,
+                            current = update.inputCurrent,
+                        )
+                    continue
+                }
+                remember(key)
+                entries[key] = update.timeline
+                markerCount++
+                if (update.timeline.markers.size > perRefMarkerCapacity) oversizedTimeline = true
+                records += setRecord(key, inserted)
+                val current = update.timeline.current
+                results += CnbRefLifecycleResult(current.generation, current.present, update.inputCurrent)
+            }
+
+            if (entries.size > capacity || markerCount > markerCapacity || oversizedTimeline) {
+                advanceGenerationFloor()
+                records += floorRecord()
+                while (true) {
+                    val victim = capacityVictim() ?: break
+                    remember(victim.key)
+                    markerCount -= requireNotNull(entries.remove(victim.key)).markers.size
+                    records += deleteRecord(victim.key)
+                }
+            }
+            journal.persist(records)
+            return results
+        } catch (failure: IOException) {
+            rollback(failure)
+        } catch (failure: RuntimeException) {
+            rollback(failure)
+        }
+    }
+
+    internal fun journalCompactionCount(): Int = journal.compactionCount
+
+    private fun insertMarker(
+        previous: LifecycleTimeline?,
+        marker: LifecycleEntry,
+        initialGeneration: Long,
+    ): TimelineUpdate {
+        if (previous == null) {
+            val inserted = marker.copy(generation = initialGeneration)
+            return TimelineUpdate(LifecycleTimeline(listOf(inserted)), inserted, inputCurrent = true)
+        }
+
+        var low = 0
+        var high = previous.markers.size - 1
+        while (low <= high) {
+            val middle = (low + high).ushr(1)
+            val order = compareMarkerOrder(marker, previous.markers[middle])
+            when {
+                order < 0 -> {
+                    high = middle - 1
+                }
+
+                order > 0 -> {
+                    low = middle + 1
+                }
+
+                else -> {
+                    return TimelineUpdate(
+                        previous,
+                        inserted = null,
+                        inputCurrent = middle == previous.markers.lastIndex,
+                    )
+                }
+            }
+        }
+
+        val insertionIndex = low
+        val baseGeneration = previous.markers.first().generation
+        val merged = ArrayList<LifecycleEntry>(previous.markers.size + 1)
+        merged.addAll(previous.markers)
+        merged.add(insertionIndex, marker.copy(generation = baseGeneration))
+
+        var generation = baseGeneration
+        for (index in merged.indices) {
+            if (index > 0 && merged[index].present && !merged[index - 1].present) {
+                check(generation < Long.MAX_VALUE) { "ref lifecycle generation overflow" }
+                generation += 1L
+            }
+            if (merged[index].generation != generation) merged[index] = merged[index].copy(generation = generation)
+        }
+        val timeline = LifecycleTimeline(merged)
+        return TimelineUpdate(
+            timeline,
+            inserted = merged[insertionIndex],
+            inputCurrent = insertionIndex == merged.lastIndex,
+        )
+    }
+
+    private fun compareMarkerOrder(
+        marker: LifecycleEntry,
+        previous: LifecycleEntry,
+    ): Int {
+        val time = marker.occurredAt.compareTo(previous.occurredAt)
+        return if (time != 0) time else compareLifecycleEventIds(marker.stableEventId, previous.stableEventId)
+    }
+
+    private fun oldestEntry(oversizedOnly: Boolean = false): Map.Entry<String, LifecycleTimeline>? {
+        var oldest: Map.Entry<String, LifecycleTimeline>? = null
+        for (candidate in entries.entries) {
+            if (oversizedOnly && candidate.value.markers.size <= perRefMarkerCapacity) continue
+            val currentOldest = oldest
+            if (currentOldest == null || compareTimelineRecency(candidate, currentOldest) < 0) oldest = candidate
+        }
+        return oldest
+    }
+
+    private fun compareTimelineRecency(
+        left: Map.Entry<String, LifecycleTimeline>,
+        right: Map.Entry<String, LifecycleTimeline>,
+    ): Int {
+        val leftCurrent = left.value.current
+        val rightCurrent = right.value.current
+        val time = leftCurrent.occurredAt.compareTo(rightCurrent.occurredAt)
+        if (time != 0) return time
+        val eventId = compareLifecycleEventIds(leftCurrent.stableEventId, rightCurrent.stableEventId)
+        return if (eventId != 0) eventId else left.key.compareTo(right.key)
+    }
+
+    private fun capacityVictim(): Map.Entry<String, LifecycleTimeline>? {
+        oldestEntry(oversizedOnly = true)?.let { return it }
+        return if (entries.size > capacity || markerCount > markerCapacity) oldestEntry() else null
+    }
+
+    private fun enforceCapacity(): Boolean {
+        var victim = capacityVictim() ?: return false
+        advanceGenerationFloor()
+        var adjusted = false
+        while (true) {
+            markerCount -= requireNotNull(entries.remove(victim.key)).markers.size
+            adjusted = true
+            victim = capacityVictim() ?: break
+        }
+        return adjusted
+    }
+
+    private fun applyLoaded(record: LifecycleRecord): Boolean {
+        when (record.operation) {
+            Operation.DELETE -> {
+                entries.remove(record.refScopeHash)?.let { markerCount -= it.markers.size }
+            }
+
+            Operation.FLOOR -> {
+                generationFloor = maxOf(generationFloor, record.generation)
+            }
+
+            Operation.SET -> {
+                val occurredAt = instantOfEpochSecondAndNano(record.epochSecond, record.nano) ?: return false
+                val update =
+                    insertMarker(
+                        entries[record.refScopeHash],
+                        LifecycleEntry(record.present, record.generation, occurredAt, record.stableEventId),
+                        record.generation,
+                    )
+                if (update.inserted != null) {
+                    entries[record.refScopeHash] = update.timeline
+                    markerCount++
+                }
+            }
+        }
+        return false
+    }
+
+    private fun snapshot(): Sequence<LifecycleRecord> =
+        sequence {
+            if (generationFloor > 0L) yield(floorRecord())
+            for ((key, timeline) in entries) {
+                for (marker in timeline.markers) yield(setRecord(key, marker))
+            }
+        }
+
+    private fun advanceGenerationFloor() {
+        val maximum =
+            entries.values.maxOfOrNull { it.current.generation }?.let { maxOf(it, generationFloor) } ?: generationFloor
+        check(maximum < Long.MAX_VALUE) { "ref lifecycle generation floor overflow" }
+        generationFloor = maximum + 1L
+    }
+
+    private fun setRecord(
+        key: String,
+        entry: LifecycleEntry,
+    ): LifecycleRecord =
+        LifecycleRecord(
+            Operation.SET,
+            key,
+            entry.present,
+            entry.generation,
+            entry.occurredAt.epochSecond,
+            entry.occurredAt.nano,
+            entry.stableEventId,
+        )
+
+    private fun deleteRecord(key: String): LifecycleRecord = LifecycleRecord(Operation.DELETE, key, false, 0L, 0L, 0, ZERO_ID)
+
+    private fun floorRecord(): LifecycleRecord = LifecycleRecord(Operation.FLOOR, FLOOR_KEY, false, generationFloor, 0L, 0, ZERO_ID)
+
+    private fun encode(record: LifecycleRecord): ByteArray =
+        encodeJournalRecord(
+            REF_LIFECYCLE_MAGIC,
+            listOf(
+                record.operation.code,
+                record.refScopeHash,
+                if (record.present) "1" else "0",
+                record.generation.toString(),
+                record.epochSecond.toString(),
+                record.nano.toString(),
+                encodeLifecycleEventId(record.stableEventId),
+            ),
+        )
+
+    private fun decode(line: String): LifecycleRecord? {
+        val fields = verifiedJournalFields(line, REF_LIFECYCLE_MAGIC, 7) ?: return null
+        val operation = Operation.entries.firstOrNull { it.code == fields[0] } ?: return null
+        val key = fields[1].takeIf(STATE_KEY_PATTERN::matches) ?: return null
+        val present =
+            when (fields[2]) {
+                "1" -> true
+                "0" -> false
+                else -> return null
+            }
+        val generation = fields[3].toLongOrNull()?.takeIf { it >= 0 } ?: return null
+        val epochSecond = fields[4].toLongOrNull() ?: return null
+        val nano = fields[5].toIntOrNull()?.takeIf { it in 0..999_999_999 } ?: return null
+        val eventId = decodeLifecycleEventId(fields[6]) ?: return null
+        if (operation == Operation.DELETE &&
+            (present || generation != 0L || epochSecond != 0L || nano != 0 || eventId != ZERO_ID)
+        ) {
+            return null
+        }
+        if (operation == Operation.FLOOR &&
+            (key != FLOOR_KEY || present || epochSecond != 0L || nano != 0 || eventId != ZERO_ID)
+        ) {
+            return null
+        }
+        return LifecycleRecord(operation, key, present, generation, epochSecond, nano, eventId)
+    }
+
+    private fun refScopeHash(
+        scope: CnbRepositoryEventStateScope,
+        qualifiedRef: String,
+    ): String = sha256("${scopeHash(scope)}\u0000$qualifiedRef")
+
+    private companion object {
+        private const val REF_LIFECYCLE_MAGIC = "CNB_REF_LIFECYCLE_V1"
+        private const val DEFAULT_REF_LIFECYCLE_CAPACITY = 100_000
+
+        // Marker records plus floor/checkpoint remain below 64 MiB at the 512-byte record bound.
+        private const val DEFAULT_REF_LIFECYCLE_MARKER_CAPACITY = 100_000
+        private const val DEFAULT_PER_REF_LIFECYCLE_MARKER_CAPACITY = 256
+        private const val ZERO_ID = "0000000000000000000000000000000000000000000000000000000000000000"
+        private const val FLOOR_KEY = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
     }
 }
 
@@ -749,6 +1165,7 @@ private class AppendOnlyStateJournal<Record>(
         )
     }
 
+    @Throws(IOException::class)
     fun persist(records: List<Record>) {
         if (records.isEmpty()) return
         val encoded = ByteArrayOutputStream()
@@ -1020,10 +1437,62 @@ private fun instantOfEpochSecond(value: Long): Instant? =
         null
     }
 
+private fun instantOfEpochSecondAndNano(
+    epochSecond: Long,
+    nano: Int,
+): Instant? =
+    try {
+        Instant.ofEpochSecond(epochSecond, nano.toLong())
+    } catch (_: DateTimeException) {
+        null
+    }
+
 private fun instantOfEpochMilli(value: Long): Instant? =
     try {
         Instant.ofEpochMilli(value)
     } catch (_: DateTimeException) {
+        null
+    }
+
+internal fun stableLifecycleEventId(
+    value: String,
+    fallback: String,
+): String = value.takeIf(::isValidLifecycleEventId) ?: fallback.also { require(isValidLifecycleEventId(it)) }
+
+internal fun compareLifecycleEventIds(
+    left: String,
+    right: String,
+): Int {
+    val leftDecimal = normalizedDecimalEventId(left)
+    val rightDecimal = normalizedDecimalEventId(right)
+    if (leftDecimal != null && rightDecimal != null) {
+        val length = leftDecimal.length.compareTo(rightDecimal.length)
+        if (length != 0) return length
+        val digits = leftDecimal.compareTo(rightDecimal)
+        if (digits != 0) return digits
+    }
+    return left.compareTo(right)
+}
+
+private fun normalizedDecimalEventId(value: String): String? {
+    if (value.isEmpty() || value.any { it !in '0'..'9' }) return null
+    return value.trimStart('0').ifEmpty { "0" }
+}
+
+private fun isValidLifecycleEventId(value: String): Boolean =
+    value.length in 1..MAX_LIFECYCLE_EVENT_ID_LENGTH && value.all { it.code in 0x20..0x7e }
+
+private fun encodeLifecycleEventId(value: String): String =
+    Base64.getUrlEncoder().withoutPadding().encodeToString(value.toByteArray(StandardCharsets.US_ASCII))
+
+private fun decodeLifecycleEventId(value: String): String? =
+    try {
+        Base64
+            .getUrlDecoder()
+            .decode(value)
+            .toString(StandardCharsets.US_ASCII)
+            .takeIf(::isValidLifecycleEventId)
+    } catch (_: IllegalArgumentException) {
         null
     }
 
@@ -1054,4 +1523,5 @@ private const val DEFAULT_JOURNAL_BYTES = 64L * 1024L * 1024L
 private const val DEFAULT_COMPACTION_THRESHOLD = 4_096
 private const val MIN_JOURNAL_BYTES = 1_024L
 private const val MAX_RECORD_BYTES = 512
+private const val MAX_LIFECYCLE_EVENT_ID_LENGTH = 200
 private const val SNAPSHOT_CHECKPOINT_RECORD = "C"

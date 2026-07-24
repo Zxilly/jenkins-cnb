@@ -3,13 +3,16 @@ package dev.zxilly.jenkins.cnb.trigger
 import dev.zxilly.jenkins.cnb.security.CnbGitObjectId
 import dev.zxilly.jenkins.cnb.webhook.CnbWebhookDelivery
 import dev.zxilly.jenkins.cnb.webhook.CnbWebhookEvent
+import hudson.Extension
 import hudson.model.Action
 import hudson.model.InvisibleAction
 import hudson.model.Job
 import hudson.model.Queue
 import hudson.model.Result
+import hudson.model.queue.QueueListener
 import jenkins.model.CauseOfInterruption
 import java.io.Serializable
+import java.util.WeakHashMap
 import java.util.logging.Level
 import java.util.logging.Logger
 
@@ -20,7 +23,12 @@ data class CnbQueueIdentity(
     val ref: String,
     val sha: String,
     val targetSha: String? = null,
+    val refGeneration: Long = 0L,
 ) : Serializable {
+    init {
+        require(refGeneration >= 0L) { "ref generation must not be negative" }
+    }
+
     companion object {
         private const val serialVersionUID = 1L
 
@@ -61,6 +69,8 @@ data class CnbQueueIdentity(
 
 class CnbQueueAction(
     val identity: CnbQueueIdentity,
+    val deliveryId: String? = null,
+    val deliveryScope: String? = null,
 ) : InvisibleAction(),
     Queue.QueueAction,
     Serializable {
@@ -84,7 +94,9 @@ class CnbQueueAction(
 
     override fun shouldSchedule(actions: List<Action>): Boolean {
         for (action in actions) {
-            if (action is CnbQueueAction && action.identity == identity) return false
+            if (action !is CnbQueueAction) continue
+            if (sameDeliveryReceipt(action, identity, deliveryId, deliveryScope)) return false
+            if (action.identity == identity && (deliveryId == null || action.deliveryId == null)) return false
         }
         return true
     }
@@ -93,10 +105,53 @@ class CnbQueueAction(
         identity.serverId == incoming.serverId &&
             identity.repositoryPath == incoming.repositoryPath &&
             identity.ref == incoming.ref &&
-            (identity.sha != incoming.sha || identity.targetSha != incoming.targetSha)
+            (
+                identity.sha != incoming.sha ||
+                    identity.targetSha != incoming.targetSha ||
+                    identity.refGeneration != incoming.refGeneration
+            )
 
     companion object {
         private const val serialVersionUID = 1L
+    }
+}
+
+internal object CnbDeliveryScope {
+    const val DIRECT = "direct"
+
+    fun pullRequestTarget(identity: CnbQueueIdentity): String = "pull-request-target:${identity.ref}"
+}
+
+private fun sameDeliveryReceipt(
+    action: CnbQueueAction,
+    incoming: CnbQueueIdentity,
+    deliveryId: String?,
+    deliveryScope: String?,
+): Boolean =
+    deliveryId != null &&
+        action.deliveryId == deliveryId &&
+        action.serverId == incoming.serverId &&
+        action.repositoryPath == incoming.repositoryPath &&
+        (action.deliveryScope ?: CnbDeliveryScope.DIRECT) == (deliveryScope ?: CnbDeliveryScope.DIRECT)
+
+@Extension
+class CnbQueueTransitionListener : QueueListener() {
+    override fun onLeft(item: Queue.LeftItem) {
+        if (item.getAction(CnbQueueAction::class.java) == null) return
+        val job = item.task as? Job<*, *> ?: return
+        CnbQueueTransitionWatermark.advance(job)
+    }
+}
+
+internal object CnbQueueTransitionWatermark {
+    private val generations = WeakHashMap<Job<*, *>, Long>()
+
+    @Synchronized
+    fun current(job: Job<*, *>): Long = generations[job] ?: 0L
+
+    @Synchronized
+    fun advance(job: Job<*, *>) {
+        generations[job] = current(job) + 1L
     }
 }
 
@@ -165,33 +220,170 @@ internal object CnbRunningBuilds {
     private val LOGGER = Logger.getLogger(CnbRunningBuilds::class.java.name)
 }
 
-/** Reads the durable queue/run action stream while the Jenkins queue lock serializes deliveries. */
-internal object CnbPullRequestRevisionHistory {
-    fun hasSameRevisionAsLastDelivery(
-        queue: Queue,
-        job: Job<*, *>,
-        incoming: CnbQueueIdentity,
-    ): Boolean {
-        if (!isPullRequestRef(incoming.ref)) return false
-        var latestQueueId = Long.MIN_VALUE
-        var latest: CnbQueueIdentity? = null
-        for (item in queue.items) {
-            if (item.task != job) continue
-            val identity = item.getAction(CnbQueueAction::class.java)?.identity ?: continue
-            if (!samePullRequest(identity, incoming) || item.id < latestQueueId) continue
-            latestQueueId = item.id
-            latest = identity
+/**
+ * Durable per-job receipt history shared by webhook and polling delivery paths.
+ *
+ * Run loading stays outside Jenkins' global queue lock. A first locked snapshot retains recent
+ * non-cancelled LeftItems as transition receipts and records an onLeft generation per job.
+ * A second lock validates that watermark before combining the Run summary with live queue items.
+ */
+internal object CnbDeliveryHistory {
+    internal data class Query(
+        val job: Job<*, *>,
+        val incoming: CnbQueueIdentity,
+        val deliveryId: String?,
+        val deliveryScope: String?,
+        val deduplicateRevision: Boolean,
+        val onlyIfNewPullRequestCommits: Boolean = false,
+    )
+
+    internal data class Entry(
+        val queueId: Long,
+        val action: CnbQueueAction,
+    )
+
+    internal data class RunSummary(
+        val exactReceipt: Boolean = false,
+        val latestRef: Entry? = null,
+        val latestPullRequest: Entry? = null,
+    ) {
+        companion object {
+            val EMPTY = RunSummary()
         }
-        for (run in job.builds) {
-            val identity = run.getAction(CnbQueueAction::class.java)?.identity ?: continue
-            if (!samePullRequest(identity, incoming) || run.queueId <= latestQueueId) continue
-            latestQueueId = run.queueId
-            latest = identity
-        }
-        return latest?.sha == incoming.sha
     }
 
-    private fun samePullRequest(
+    internal data class StableHistory(
+        val query: Query,
+        val runs: RunSummary,
+        val transitions: List<Entry>,
+    )
+
+    private data class TransitionSnapshot(
+        val watermark: Long = Long.MIN_VALUE,
+        val entries: List<Entry> = emptyList(),
+    )
+
+    internal fun loadRunHistory(query: Query): RunSummary {
+        var exactReceipt = false
+        var latestRef: Entry? = null
+        var latestPullRequest: Entry? = null
+        val trackPullRequest = query.onlyIfNewPullRequestCommits && isPullRequestRef(query.incoming.ref)
+        for (run in query.job.builds) {
+            val action = run.getAction(CnbQueueAction::class.java) ?: continue
+            if (!exactReceipt && sameDeliveryReceipt(action, query.incoming, query.deliveryId, query.deliveryScope)) {
+                exactReceipt = true
+            }
+            if (query.deduplicateRevision && sameRef(action.identity, query.incoming)) {
+                latestRef = newer(latestRef, Entry(run.queueId, action))
+            }
+            if (trackPullRequest && sameRef(action.identity, query.incoming)) {
+                latestPullRequest = newer(latestPullRequest, Entry(run.queueId, action))
+            }
+        }
+        return RunSummary(exactReceipt, latestRef, latestPullRequest)
+    }
+
+    internal fun <T> withStableQueue(
+        queries: List<Query>,
+        loadRunHistory: (Query) -> RunSummary = ::loadRunHistory,
+        action: (Queue, List<StableHistory>) -> T,
+    ): T {
+        require(queries.isNotEmpty()) { "At least one CNB delivery history query is required" }
+        val jobs = LinkedHashSet<Job<*, *>>(queries.size)
+        for (query in queries) jobs.add(query.job)
+        repeat(MAX_STABILITY_ATTEMPTS) {
+            lateinit var transitions: Map<Job<*, *>, TransitionSnapshot>
+            Queue.withLock {
+                transitions = captureTransitions(Queue.getInstance(), jobs)
+            }
+
+            val histories = ArrayList<StableHistory>(queries.size)
+            for (query in queries) {
+                histories +=
+                    StableHistory(
+                        query,
+                        loadRunHistory(query),
+                        transitions.getValue(query.job).entries,
+                    )
+            }
+
+            var stable = false
+            var result: T? = null
+            Queue.withLock {
+                val queue = Queue.getInstance()
+                val current = captureTransitions(queue, jobs)
+                if (jobs.all { job -> current.getValue(job).watermark == transitions.getValue(job).watermark }) {
+                    result = action(queue, histories)
+                    stable = true
+                }
+            }
+            if (stable) {
+                @Suppress("UNCHECKED_CAST")
+                return result as T
+            }
+        }
+        throw CnbDeliveryHistoryUnstableException(MAX_STABILITY_ATTEMPTS)
+    }
+
+    internal fun contains(
+        queue: Queue,
+        history: StableHistory,
+    ): Boolean {
+        val query = history.query
+        if (history.runs.exactReceipt) return true
+        var latestRef = history.runs.latestRef
+        var latestPullRequest = history.runs.latestPullRequest
+
+        fun observe(entry: Entry): Boolean {
+            val action = entry.action
+            if (sameDeliveryReceipt(action, query.incoming, query.deliveryId, query.deliveryScope)) return true
+            if (query.deduplicateRevision && sameRef(action.identity, query.incoming)) {
+                latestRef = newer(latestRef, entry)
+            }
+            if (query.onlyIfNewPullRequestCommits &&
+                isPullRequestRef(query.incoming.ref) &&
+                sameRef(action.identity, query.incoming)
+            ) {
+                latestPullRequest = newer(latestPullRequest, entry)
+            }
+            return false
+        }
+
+        for (entry in history.transitions) {
+            if (observe(entry)) return true
+        }
+        for (item in queue.items) {
+            if (item.task != query.job) continue
+            val queued = item.getAction(CnbQueueAction::class.java) ?: continue
+            if (observe(Entry(item.id, queued))) return true
+        }
+        if (query.deduplicateRevision && latestRef?.action?.identity == query.incoming) return true
+        return query.onlyIfNewPullRequestCommits && latestPullRequest?.action?.sha == query.incoming.sha
+    }
+
+    private fun captureTransitions(
+        queue: Queue,
+        jobs: Set<Job<*, *>>,
+    ): Map<Job<*, *>, TransitionSnapshot> {
+        val entries = jobs.associateWithTo(linkedMapOf()) { ArrayList<Entry>() }
+        for (item in queue.leftItems) {
+            val job = item.task as? Job<*, *> ?: continue
+            if (job !in jobs) continue
+            if (item.isCancelled) continue
+            val action = item.getAction(CnbQueueAction::class.java) ?: continue
+            entries.getValue(job) += Entry(item.id, action)
+        }
+        return jobs.associateWithTo(linkedMapOf()) { job ->
+            TransitionSnapshot(CnbQueueTransitionWatermark.current(job), entries.getValue(job))
+        }
+    }
+
+    private fun newer(
+        previous: Entry?,
+        candidate: Entry,
+    ): Entry = if (previous == null || candidate.queueId > previous.queueId) candidate else previous
+
+    private fun sameRef(
         previous: CnbQueueIdentity,
         incoming: CnbQueueIdentity,
     ): Boolean =
@@ -204,7 +396,13 @@ internal object CnbPullRequestRevisionHistory {
         val number = value.removePrefix("refs/pull/").removeSuffix("/head")
         return number.isNotEmpty() && number.all { it in '0'..'9' }
     }
+
+    private const val MAX_STABILITY_ATTEMPTS = 8
 }
+
+internal class CnbDeliveryHistoryUnstableException(
+    val attempts: Int,
+) : RuntimeException("CNB queue kept changing during $attempts delivery history scans")
 
 /** Persisted on an aborted run so the exact, non-secret supersession scope remains auditable. */
 class CnbSupersededByPullRequestUpdate(

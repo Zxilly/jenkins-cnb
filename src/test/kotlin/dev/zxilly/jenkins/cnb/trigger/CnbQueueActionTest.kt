@@ -37,6 +37,49 @@ class CnbQueueActionTest {
     }
 
     @Test
+    fun `webhook receipts distinguish separate deliveries of the same revision`() {
+        val identity = CnbQueueIdentity("primary", "team/project", "refs/pull/7/head", SHA_A, SHA_C)
+        val queued = CnbQueueAction(identity, "delivery-1", CnbDeliveryScope.DIRECT)
+        val changedPayload = identity.copy(ref = "refs/pull/8/head", sha = SHA_B)
+
+        assertFalse(CnbQueueAction(identity, "delivery-1", CnbDeliveryScope.DIRECT).shouldSchedule(listOf(queued)))
+        assertFalse(
+            CnbQueueAction(changedPayload, "delivery-1", CnbDeliveryScope.DIRECT).shouldSchedule(listOf(queued)),
+            "A direct replay remains the same receipt even when its ref and revision payload change",
+        )
+        assertTrue(CnbQueueAction(identity, "delivery-2", CnbDeliveryScope.DIRECT).shouldSchedule(listOf(queued)))
+        assertTrue(
+            CnbQueueAction(
+                changedPayload,
+                "delivery-1",
+                CnbDeliveryScope.pullRequestTarget(changedPayload),
+            ).shouldSchedule(listOf(queued)),
+        )
+        assertFalse(
+            CnbQueueAction(changedPayload, "legacy-delivery", CnbDeliveryScope.DIRECT).shouldSchedule(
+                listOf(CnbQueueAction(identity, "legacy-delivery")),
+            ),
+        )
+        assertTrue(
+            CnbQueueAction(
+                changedPayload,
+                "legacy-delivery",
+                CnbDeliveryScope.pullRequestTarget(changedPayload),
+            ).shouldSchedule(listOf(CnbQueueAction(identity, "legacy-delivery"))),
+        )
+        assertFalse(CnbQueueAction(identity).shouldSchedule(listOf(queued)))
+    }
+
+    @Test
+    fun `same SHA in a recreated ref generation is a distinct revision`() {
+        val original = CnbQueueIdentity("primary", "team/project", "refs/heads/main", SHA_A)
+        val recreated = original.copy(refGeneration = 1L)
+
+        assertTrue(CnbQueueAction(recreated).shouldSchedule(listOf(CnbQueueAction(original))))
+        assertTrue(CnbQueueAction(original).isSupersededBy(recreated))
+    }
+
+    @Test
     fun `queue identity preserves a complete SHA-256 revision`() {
         val sha256 = "d".repeat(64)
 

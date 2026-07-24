@@ -10,6 +10,12 @@ import java.util.Locale
 
 /** Selects an exact configured Git remote that can actually provide a verified CNB revision. */
 internal object CnbClassicGitRevisionAction {
+    fun supports(job: Job<*, *>): Boolean =
+        SCMTriggerItem.SCMTriggerItems
+            .asSCMTriggerItem(job)
+            ?.getSCMs()
+            ?.any { it is GitSCM } == true
+
     fun create(
         job: Job<*, *>,
         commit: String,

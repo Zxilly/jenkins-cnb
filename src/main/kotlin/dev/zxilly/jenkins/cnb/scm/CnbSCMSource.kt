@@ -457,9 +457,10 @@ open class CnbSCMSource
         /**
          * Returns the safest REST representation of a pull-request checkout for criteria checks.
          *
-         * CNB does not always publish a merge commit. For a trusted local merge, the source tree is
-         * checked first and the immutable target base is used as a conservative fallback. This
-         * preserves target-owned Jenkinsfiles without allowing an untrusted fork to supply one.
+         * GitSCM constructs MERGE checkouts from the immutable source head and target base. A CNB
+         * server merge hash cannot reproduce that local checkout through the REST content API, so
+         * trusted criteria use the same two inputs conservatively: source first, then target base.
+         * Untrusted forks remain restricted to target-owned Jenkinsfiles.
          */
         private fun pullRequestCriteriaProbe(
             client: CnbClient,
@@ -490,14 +491,6 @@ open class CnbSCMSource
                 }
             }
 
-            val mergeHash = revision.mergeHash?.takeIf { it.isNotBlank() }
-            if (head.isMerge && mergeHash != null) {
-                return if (ownsClient) {
-                    CnbSCMProbe.owned(client, targetRepository, mergeHash, head.name, revision)
-                } else {
-                    CnbSCMProbe.shared(client, targetRepository, mergeHash, head.name, revision)
-                }
-            }
             if (head.isMerge) {
                 return if (ownsClient) {
                     CnbSCMProbe.ownedWithFallback(

@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Test
 import org.jvnet.hudson.test.JenkinsRule
 import org.jvnet.hudson.test.junit.jupiter.WithJenkins
+import java.io.StringWriter
 import java.time.Instant
 
 @WithJenkins
@@ -44,6 +45,27 @@ class CnbBuildDescriptionRunListenerTest {
     }
 
     @Test
+    fun `stores plain text and lets the Jenkins formatter escape the build description`(jenkins: JenkinsRule) {
+        val project = jenkins.createFreeStyleProject("descriptions-hostile")
+        project.addTrigger(CnbPushTrigger("primary", "team/project", "**"))
+        val hostile = delivery(ref = "main<img src=x onerror='alert(1)'>", actor = "alice & <admin>")
+
+        val build = jenkins.assertBuildStatusSuccess(project.scheduleBuild2(0, CnbPushCause.from(hostile)))
+
+        val description = requireNotNull(build.description)
+        assertEquals(
+            "CNB push event for team/project at main<img src=x onerror='alert(1)'> by alice & <admin>",
+            description,
+        )
+        val rendered = StringWriter()
+        jenkins.jenkins.markupFormatter.translate(description, rendered)
+        assertEquals(
+            "CNB push event for team/project at main&lt;img src=x onerror=&#039;alert(1)&#039;&gt; by alice &amp; &lt;admin&gt;",
+            rendered.toString(),
+        )
+    }
+
+    @Test
     fun `never overwrites an existing build description`(jenkins: JenkinsRule) {
         val project = jenkins.createFreeStyleProject("descriptions-existing")
         project.addTrigger(CnbPushTrigger("primary", "team/project", "**"))
@@ -56,7 +78,10 @@ class CnbBuildDescriptionRunListenerTest {
         assertEquals(1, build.getActions(CauseAction::class.java).size)
     }
 
-    private fun delivery(): CnbWebhookDelivery =
+    private fun delivery(
+        ref: String = "main",
+        actor: String = "alice",
+    ): CnbWebhookDelivery =
         CnbWebhookDelivery(
             "primary",
             CnbWebhookPayload(
@@ -68,8 +93,8 @@ class CnbBuildDescriptionRunListenerTest {
                 retry = false,
                 instance = CnbWebhookInstance("https://cnb.cool", "https://api.cnb.cool"),
                 repository = CnbWebhookRepository("repo-1", "team/project", "https://cnb.cool/team/project"),
-                actor = CnbWebhookActor("user-1", "alice", "Alice", ""),
-                ref = CnbWebhookRef("main", SHA, "b".repeat(40), SHA, false),
+                actor = CnbWebhookActor("user-1", actor, "Alice", ""),
+                ref = CnbWebhookRef(ref, SHA, "b".repeat(40), SHA, false),
                 pullRequest = null,
             ),
             "test",

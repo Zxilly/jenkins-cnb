@@ -112,15 +112,16 @@ class CnbSCMFileSystem private constructor(
                         throw IOException("CNB revision does not belong to pull request ${head.number}")
                     }
                     if (head.isMerge) {
-                        revision.mergeHash?.takeIf { it.isNotBlank() }?.let {
-                            Location(targetRepository, it, revision, 0)
-                        }
+                        null
                     } else {
                         Location(head.sourceRepository, revision.headHash, revision, 0)
                     }
                 }
 
                 head is CnbPullRequestSCMHead && revision == null -> {
+                    if (head.isMerge) {
+                        return null
+                    }
                     val pullRequest = CnbPullRequestIdentity.fetchOpen(client, targetRepository, head) ?: return null
                     val resolved =
                         CnbPullRequestSCMRevision(
@@ -129,13 +130,7 @@ class CnbSCMFileSystem private constructor(
                             pullRequest.sourceSha,
                             pullRequest.mergeSha,
                         )
-                    if (head.isMerge) {
-                        pullRequest.mergeSha?.takeIf { it.isNotBlank() }?.let {
-                            Location(targetRepository, it, resolved, 0)
-                        }
-                    } else {
-                        Location(pullRequest.sourceRepo, pullRequest.sourceSha, resolved, 0)
-                    }
+                    Location(pullRequest.sourceRepo, pullRequest.sourceSha, resolved, 0)
                 }
 
                 head is CnbBranchSCMHead -> {

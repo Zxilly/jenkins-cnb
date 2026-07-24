@@ -20,4 +20,6 @@ Conventional Commits.
 - Strongly typed, bounded batch reads for Commit annotations in API and Pipeline.
 - Strongly typed CNB Badge list, JSON read, and explicit upload steps with README-ready URLs.
 - Ktor 3.5.1 Apache5 transport integrated with kotlinx.serialization and bounded streaming transfers.
+- Production hardening for bounded API responses, restart-safe workspace transfers, durable event recovery,
+  recoverable metadata/webhook delivery, escaped build descriptions, and release-gating security scans.
 - Java 17 bytecode, Jenkins 2.541.3 minimum, Java 17/21/25 CI, and an enforced 86% line-coverage floor.

@@ -680,14 +680,35 @@ internal class HttpCnbClient(
         label: String,
     ): CnbLabel {
         validatePullLabels(listOf(label))
-        val wire =
-            requestJson(
-                "DELETE",
-                "/${encodeRepository(repo)}/-/pulls/${encodePullRequestNumber(number)}/labels/${encodeSegment(label)}",
-                CnbLabelWire.serializer(),
-                idempotent = true,
-            ) ?: throw CnbApiException("CNB remove pull request label response was empty")
-        return parseLabel(wire)
+        val cachedLabel = listPullLabels(repo, number).firstOrNull { it.name == label }
+        return requestValue(
+            method = "DELETE",
+            path = "/${encodeRepository(repo)}/-/pulls/${encodePullRequestNumber(number)}/labels/${encodeSegment(label)}",
+            query = emptyMap(),
+            body = null,
+            idempotent = true,
+            acceptNotFound = false,
+            acceptNotFoundAfterRetryableFailure = cachedLabel != null,
+            notFoundAfterRetryValue = cachedLabel,
+            successReader = RemovedPullLabelResponseReader(),
+        ) ?: throw CnbApiException("CNB remove pull request label response was empty")
+    }
+
+    private inner class RemovedPullLabelResponseReader : CnbHttpResponseReader<CnbLabel> {
+        override suspend fun read(response: CnbHttpResponseContext): CnbLabel = readRemovedPullLabel(response)
+    }
+
+    private suspend fun readRemovedPullLabel(response: CnbHttpResponseContext?): CnbLabel {
+        val responseContext =
+            response ?: throw CnbApiException("CNB remove pull request label response was empty")
+        if (
+            responseContext.statusCode == 204 || responseContext.statusCode == 205 ||
+            responseContext.headers.allValues("Content-Length") == listOf("0")
+        ) {
+            throw CnbApiException("CNB remove pull request label response was empty")
+        }
+        val wire: CnbLabelWire? = responseContext.readJson(typeInfo<CnbLabelWire>())
+        return parseLabel(wire ?: throw CnbApiException("CNB remove pull request label response was empty"))
     }
 
     override fun clearPullLabels(
@@ -1849,7 +1870,17 @@ internal class HttpCnbClient(
         idempotent: Boolean = method == "GET",
         acceptNotFound: Boolean = false,
     ) {
-        requestBytes(method, path, query, body, idempotent, acceptNotFound)
+        requestValue(
+            method = method,
+            path = path,
+            query = query,
+            body = body,
+            idempotent = idempotent,
+            acceptNotFound = acceptNotFound,
+            acceptNotFoundAfterRetryableFailure = method == "DELETE" && idempotent,
+        ) { response ->
+            response.readBoundedBytes(MAX_API_RESPONSE_BYTES)
+        }
     }
 
     private fun <T> encodeRequest(
@@ -1864,7 +1895,10 @@ internal class HttpCnbClient(
         body: CnbEncodedJsonBody? = null,
         idempotent: Boolean = method == "GET",
         acceptNotFound: Boolean = false,
-    ): ByteArray? = requestValue(method, path, query, body, idempotent, acceptNotFound) { response -> response.readBytes() }
+    ): ByteArray? =
+        requestValue(method, path, query, body, idempotent, acceptNotFound) { response ->
+            response.readBoundedBytes(MAX_API_RESPONSE_BYTES)
+        }
 
     private fun <T> requestValue(
         method: String,
@@ -1873,6 +1907,8 @@ internal class HttpCnbClient(
         body: CnbEncodedJsonBody?,
         idempotent: Boolean,
         acceptNotFound: Boolean,
+        acceptNotFoundAfterRetryableFailure: Boolean = false,
+        notFoundAfterRetryValue: T? = null,
         successReader: CnbHttpResponseReader<T>,
     ): T? {
         try {
@@ -1880,6 +1916,7 @@ internal class HttpCnbClient(
             circuit.beforeRequest()
             val uri = buildUri(path, query)
             var lastFailure: Throwable? = null
+            var retryableFailureSeen = false
             val attempts = if (idempotent) MAX_ATTEMPTS else 1
             for (attempt in 1..attempts) {
                 try {
@@ -1891,9 +1928,15 @@ internal class HttpCnbClient(
                                 ApiResponseBody.Error(context.readBoundedBytes(MAX_ERROR_RESPONSE_BYTES))
                             }
                         }
-                    if (response.statusCode == 404 && acceptNotFound) {
+                    if (
+                        response.statusCode == 404 &&
+                        (
+                            acceptNotFound ||
+                                (method == "DELETE" && acceptNotFoundAfterRetryableFailure && retryableFailureSeen)
+                        )
+                    ) {
                         circuit.success()
-                        return null
+                        return if (retryableFailureSeen) notFoundAfterRetryValue else null
                     }
                     if (response.statusCode in 200..299) {
                         circuit.success()
@@ -1911,6 +1954,7 @@ internal class HttpCnbClient(
                         circuit.failure()
                         throw error
                     }
+                    retryableFailureSeen = true
                     lastFailure = error
                     sleepBeforeRetry(attempt, response.headers.firstValue("Retry-After"))
                 } catch (e: InterruptedException) {
@@ -1924,6 +1968,7 @@ internal class HttpCnbClient(
                         circuit.failure()
                         throw CnbApiException("CNB request failed: ${safeMessage(e)}", retryable = true, cause = e)
                     }
+                    retryableFailureSeen = true
                     sleepBeforeRetry(attempt, null)
                 }
             }
@@ -2550,14 +2595,10 @@ internal class HttpCnbClient(
         uri: URI,
         body: CnbEncodedJsonBody?,
         includeAuthorization: Boolean = true,
-        maxResponseBytes: Int? = null,
+        maxResponseBytes: Int = MAX_API_RESPONSE_BYTES,
     ): CnbHttpResponse<ByteArray> =
         executeWithReader(method, uri, body, includeAuthorization) { response ->
-            if (maxResponseBytes == null) {
-                response.readBytes()
-            } else {
-                response.readBoundedBytes(maxResponseBytes)
-            }
+            response.readBoundedBytes(maxResponseBytes)
         }
 
     private fun <T> executeWithReader(
@@ -3915,6 +3956,7 @@ internal class HttpCnbClient(
         private const val MAX_PAGES = 100
         private const val MAX_PAGINATED_ITEMS = 10_000
         private const val MAX_PAGINATED_BYTES = 16L * 1024 * 1024
+        private const val MAX_API_RESPONSE_BYTES = 16 * 1024 * 1024
         private const val MAX_CONCURRENT_REQUESTS = 8
         private const val PERMIT_WAIT_SECONDS = 5L
         private const val MAX_ATTEMPTS = 4

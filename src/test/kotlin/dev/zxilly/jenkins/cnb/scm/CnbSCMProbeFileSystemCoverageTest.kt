@@ -348,7 +348,7 @@ class CnbSCMProbeFileSystemCoverageTest {
     }
 
     @Test
-    fun `file system builder resolves trusted target and pull request locations`() {
+    fun `file system builder resolves trusted and head locations and declines merge locations`() {
         val source = CnbSCMSource("cnb-cool", "team/repo")
         val mergeHead = pullRequestHead(ChangeRequestCheckoutStrategy.MERGE)
         val headHead = pullRequestHead(ChangeRequestCheckoutStrategy.HEAD)
@@ -360,8 +360,7 @@ class CnbSCMProbeFileSystemCoverageTest {
 
         val mergeRevision = CnbPullRequestSCMRevision(mergeHead, "b".repeat(40), "a".repeat(40), "d".repeat(40))
         val mergeFs = TestBuilder { repositoryClient() }.build(source, mergeHead, mergeRevision)
-        assertSame(mergeRevision, mergeFs!!.revision)
-        mergeFs.close()
+        assertNull(mergeFs)
 
         val headRevision = CnbPullRequestSCMRevision(headHead, "b".repeat(40), "a".repeat(40), null)
         val headFs = TestBuilder { repositoryClient() }.build(source, headHead, headRevision)

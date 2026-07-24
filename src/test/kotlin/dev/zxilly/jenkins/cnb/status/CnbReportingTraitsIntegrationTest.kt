@@ -9,6 +9,7 @@ import dev.zxilly.jenkins.cnb.scm.CnbReportingContextTrait
 import dev.zxilly.jenkins.cnb.scm.CnbSCMSource
 import dev.zxilly.jenkins.cnb.scm.CnbSkipReportingTrait
 import hudson.EnvVars
+import hudson.model.Queue
 import hudson.model.TaskListener
 import hudson.scm.NullSCM
 import jenkins.branch.Branch
@@ -113,6 +114,80 @@ class CnbReportingTraitsIntegrationTest {
         assertEquals(CnbBuildMetadataState.SUCCESS, action.state())
     }
 
+    @Test
+    fun `lifecycle keeps the persisted target while an explicit report can retarget the run`(jenkins: JenkinsRule) {
+        configureDisabledReporting(jenkins)
+        val fixture =
+            branchJob(
+                jenkins,
+                "stable-target",
+                emptyList(),
+                "echo 'capture the original target'",
+            )
+        val run = buildWithRevision(jenkins, fixture, "a".repeat(40))
+        val action = requireNotNull(run.getAction(CnbBuildMetadataAction::class.java))
+        assertEquals("team/repository", action.target()?.repository)
+
+        val replacement = CnbSCMSource("cnb-cool", "team/replacement")
+        replacement.withId(fixture.source.id)
+        fixture.project.sourcesList.clear()
+        fixture.project.sourcesList.add(BranchSource(replacement))
+        fixture.project.save()
+
+        assertTrue(CnbBuildMetadataService.reportRunLifecycle(run, CnbBuildMetadataState.SUCCESS))
+        assertEquals("team/repository", action.target()?.repository)
+        assertEquals("a".repeat(40), action.target()?.sha)
+
+        assertTrue(
+            CnbBuildMetadataService.reportRun(
+                run,
+                CnbBuildMetadataState.SUCCESS,
+                suppliedConfiguration =
+                    CnbBuildMetadataConfiguration(
+                        serverId = "cnb-cool",
+                        repository = "team/replacement",
+                        sha = "b".repeat(40),
+                    ),
+            ),
+        )
+        assertEquals("team/replacement", action.target()?.repository)
+        assertEquals("b".repeat(40), action.target()?.sha)
+    }
+
+    @Test
+    fun `queued multibranch revision reports queued and cancelled states before a run exists`(jenkins: JenkinsRule) {
+        configureDisabledReporting(jenkins)
+        val fixture =
+            branchJob(
+                jenkins,
+                "queued-revision",
+                emptyList(),
+                "echo 'must not start'",
+            )
+        val revision = CnbBranchSCMRevision(fixture.head, "c".repeat(40))
+
+        @Suppress("DEPRECATION")
+        val item =
+            requireNotNull(
+                Queue.getInstance().schedule(
+                    fixture.job,
+                    3_600,
+                    listOf(SCMRevisionAction(fixture.source, revision)),
+                ),
+            )
+        try {
+            val action = requireNotNull(item.getAction(CnbBuildMetadataAction::class.java))
+            assertEquals(CnbBuildMetadataState.QUEUED, action.state())
+            assertEquals("team/repository", action.target()?.repository)
+            assertEquals("c".repeat(40), action.target()?.sha)
+
+            assertTrue(Queue.getInstance().cancel(item))
+            assertEquals(CnbBuildMetadataState.ABORTED, action.state())
+        } finally {
+            Queue.getInstance().cancel(item)
+        }
+    }
+
     private fun branchJob(
         jenkins: JenkinsRule,
         name: String,
@@ -138,7 +213,7 @@ class CnbReportingTraitsIntegrationTest {
         val policy = CnbBranchSourceReportingPolicy.forItem(job)
         assertEquals(traits.none { it is CnbSkipReportingTrait }, policy.automaticReportingEnabled)
         assertEquals(traits.filterIsInstance<CnbReportingContextTrait>().lastOrNull()?.context, policy.defaultContext)
-        return BranchFixture(job, source, head)
+        return BranchFixture(project, job, source, head)
     }
 
     private fun buildWithRevision(
@@ -161,6 +236,7 @@ class CnbReportingTraitsIntegrationTest {
     }
 
     private data class BranchFixture(
+        val project: WorkflowMultiBranchProject,
         val job: WorkflowJob,
         val source: CnbSCMSource,
         val head: CnbBranchSCMHead,

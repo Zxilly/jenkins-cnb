@@ -44,6 +44,14 @@ internal object CnbBuildMetadataDispatcher {
         delaySeconds: Long = 0,
     ): Boolean = runtime.scheduleItem(item, action, delaySeconds)
 
+    fun schedulePersisted(
+        item: Item?,
+        record: CnbCancelledBuildMetadataRecord,
+        store: CnbCancelledBuildMetadataStore = CnbCancelledBuildMetadataStores.current(),
+        delaySeconds: Long = 0,
+        initialPersistenceRequired: Boolean = record.action.itemPersistenceRequired(),
+    ): Boolean = runtime.schedulePersistedItem(item, record, store, delaySeconds, initialPersistenceRequired)
+
     fun shutdown() {
         runtime.shutdown()
     }
@@ -150,6 +158,7 @@ internal class CnbBuildMetadataDispatchRuntime(
     private val pendingCapacity: Int = DEFAULT_PENDING_CAPACITY,
     private val clockMillis: () -> Long = System::currentTimeMillis,
     private val recoveryRequests: CnbBuildMetadataRecoveryGate = CNB_BUILD_METADATA_RECOVERY_REQUESTS,
+    private val requestRecovery: () -> Unit = { recoveryRequests.request() },
     private val saveRun: (Run<*, *>) -> Unit = { it.save() },
 ) {
     private val stateLock = Any()
@@ -172,13 +181,57 @@ internal class CnbBuildMetadataDispatchRuntime(
         run: Run<*, *>,
         action: CnbBuildMetadataAction,
         delaySeconds: Long = 0,
-    ): Boolean = enqueue(Work.create(action, run.parent, run, delaySeconds, clockMillis()))
+    ): Boolean =
+        enqueue(
+            Work.create(
+                action,
+                run.parent,
+                run,
+                delaySeconds,
+                clockMillis(),
+                cancelledRecord = null,
+                cancelledStore = null,
+                initialPersistenceRequired = false,
+            ),
+        )
 
     fun scheduleItem(
         item: Item?,
         action: CnbBuildMetadataAction,
         delaySeconds: Long = 0,
-    ): Boolean = enqueue(Work.create(action, item, null, delaySeconds, clockMillis()))
+    ): Boolean =
+        enqueue(
+            Work.create(
+                action,
+                item,
+                null,
+                delaySeconds,
+                clockMillis(),
+                cancelledRecord = null,
+                cancelledStore = null,
+                initialPersistenceRequired = false,
+            ),
+        )
+
+    fun schedulePersistedItem(
+        item: Item?,
+        record: CnbCancelledBuildMetadataRecord,
+        store: CnbCancelledBuildMetadataStore,
+        delaySeconds: Long = 0,
+        initialPersistenceRequired: Boolean = record.action.itemPersistenceRequired(),
+    ): Boolean =
+        enqueue(
+            Work.create(
+                record.action,
+                item,
+                null,
+                delaySeconds,
+                clockMillis(),
+                cancelledRecord = record,
+                cancelledStore = store,
+                initialPersistenceRequired = initialPersistenceRequired,
+            ),
+        )
 
     fun shutdown() {
         if (!shuttingDown.compareAndSet(false, true)) return
@@ -217,9 +270,17 @@ internal class CnbBuildMetadataDispatchRuntime(
                     }
 
                     running != null && candidate.versionHint <= running.versionHint -> {
-                        // The active report snapshots the same durable Action. A same-version
-                        // periodic reconciliation does not need a duplicate in-memory entry.
-                        true
+                        if (!candidate.persistedCancellation || running.persistedCancellation) {
+                            // The active work already owns every acknowledgement obligation.
+                            true
+                        } else if (pending.size < pendingCapacity) {
+                            // A transient report cannot remove the durable cancellation record. Retain a
+                            // same-version cleanup entry for after the active report commits.
+                            pending[key] = candidate
+                            true
+                        } else {
+                            false
+                        }
                     }
 
                     pending.size < pendingCapacity -> {
@@ -289,28 +350,75 @@ internal class CnbBuildMetadataDispatchRuntime(
         }
 
     private fun executeOne(work: Work) {
+        var currentWork = work
         var snapshot: CnbBuildMetadataSnapshot? = null
+        var requestRecoveryAfterActiveRemoval = false
         try {
-            snapshot = work.action.snapshot() ?: return
-            val result = reporter.report(snapshot, work.item)
-            markReportedAndPersist(work, snapshot, result.commentId)
+            if (currentWork.persistedCancellation && currentWork.initialPersistenceRequired) {
+                val persisted =
+                    synchronized(currentWork.action) {
+                        persistCancellation(currentWork).also { saved ->
+                            if (saved) currentWork.action.releaseItemPersistence()
+                        }
+                    }
+                if (!persisted) {
+                    requeuePersistence(currentWork, "initial cancelled build metadata persistence failure")
+                    return
+                }
+                currentWork = currentWork.copy(initialPersistenceRequired = false, persistenceAttempt = 0)
+            }
+            snapshot = currentWork.action.snapshot()
+            if (snapshot == null) {
+                if (currentWork.persistedCancellation) commitPersistedCancellationCleanup(currentWork)
+                return
+            }
+            val reportingItem =
+                if (currentWork.persistedCancellation) {
+                    val store = checkNotNull(currentWork.cancelledStore) { "Persisted cancellation work must retain its store" }
+                    val resolution = store.resolveCredentialContext(checkNotNull(currentWork.cancelledRecord))
+                    when (resolution.state) {
+                        CnbCancelledBuildMetadataCredentialResolution.State.AVAILABLE -> {
+                            resolution.item
+                        }
+
+                        CnbCancelledBuildMetadataCredentialResolution.State.MISSING -> {
+                            requeuePersistence(currentWork, "cancelled metadata credential context unavailable")
+                            return
+                        }
+
+                        CnbCancelledBuildMetadataCredentialResolution.State.DELETED -> {
+                            discardPersistedCancellation(currentWork)
+                            return
+                        }
+                    }
+                } else {
+                    currentWork.item
+                }
+            val result = reporter.report(snapshot, reportingItem)
+            markReportedAndPersist(currentWork, snapshot, result.commentId)
         } catch (e: InterruptedException) {
-            handleInterruption(work)
+            handleInterruption(currentWork)
         } catch (e: CnbApiException) {
             if (e.causedByInterruption()) {
-                handleInterruption(work)
+                handleInterruption(currentWork)
             } else {
-                logFailure(work, snapshot, e)
-                if (snapshot != null) handleApiFailure(work, snapshot, e)
+                logFailure(currentWork, snapshot, e)
+                if (snapshot != null) {
+                    requestRecoveryAfterActiveRemoval = handleApiFailure(currentWork, snapshot, e)
+                }
             }
         } catch (e: Exception) {
-            logFailure(work, snapshot, e)
+            logFailure(currentWork, snapshot, e)
             if (snapshot != null) {
-                markReportedAndPersist(work, snapshot, null)
+                requestRecoveryAfterActiveRemoval = handleUnexpectedFailure(currentWork, snapshot)
             }
         } finally {
             removeActive(work.key)
-            requestDrain()
+            try {
+                if (requestRecoveryAfterActiveRemoval) requestRecovery()
+            } finally {
+                requestDrain()
+            }
         }
     }
 
@@ -318,16 +426,15 @@ internal class CnbBuildMetadataDispatchRuntime(
         work: Work,
         snapshot: CnbBuildMetadataSnapshot,
         failure: CnbApiException,
-    ) {
+    ): Boolean {
         if (!failure.retryable) {
             markReportedAndPersist(work, snapshot, null)
-            return
+            return false
         }
-        if (hasQueuedSuccessor(work.key)) return
+        if (hasQueuedSuccessor(work.key)) return false
         if (work.attempt >= RETRY_DELAYS_SECONDS.size) {
             logRetriesExhausted(work, snapshot)
-            markReportedAndPersist(work, snapshot, null)
-            return
+            return true
         }
 
         val baseDelay = RETRY_DELAYS_SECONDS[work.attempt]
@@ -339,6 +446,7 @@ internal class CnbBuildMetadataDispatchRuntime(
             ),
             "retry",
         )
+        return false
     }
 
     private fun handleInterruption(work: Work) {
@@ -353,6 +461,27 @@ internal class CnbBuildMetadataDispatchRuntime(
             "CNB build metadata reconciliation interrupted for build={0}; it remains pending",
             work.run?.externalizableId ?: work.item?.fullName ?: "queue-item",
         )
+    }
+
+    private fun handleUnexpectedFailure(
+        work: Work,
+        snapshot: CnbBuildMetadataSnapshot,
+    ): Boolean {
+        if (hasQueuedSuccessor(work.key)) return false
+        if (work.attempt >= RETRY_DELAYS_SECONDS.size) {
+            logRetriesExhausted(work, snapshot)
+            return true
+        }
+        val baseDelay = RETRY_DELAYS_SECONDS[work.attempt]
+        val delaySeconds = ThreadLocalRandom.current().nextLong(baseDelay * 4 / 5, baseDelay * 6 / 5 + 1)
+        requeue(
+            work.copy(
+                attempt = work.attempt + 1,
+                notBeforeMillis = safeAddMillis(clockMillis(), TimeUnit.SECONDS.toMillis(delaySeconds)),
+            ),
+            "unexpected reporting failure",
+        )
+        return false
     }
 
     private fun deferAfterWorkerRejection(work: Work) {
@@ -395,10 +524,41 @@ internal class CnbBuildMetadataDispatchRuntime(
         snapshot: CnbBuildMetadataSnapshot,
         commentId: String?,
     ) {
+        if (work.persistedCancellation) {
+            var successorPending = false
+            val committed =
+                synchronized(work.action) {
+                    val checkpoint = work.action.markReported(snapshot.version, commentId)
+                    successorPending = work.action.isPending()
+                    val saved =
+                        if (successorPending) {
+                            persistCancellation(work)
+                        } else {
+                            removePersistedCancellation(work)
+                        }
+                    if (saved && successorPending) work.action.releaseItemPersistence()
+                    if (!saved) work.action.restorePending(checkpoint)
+                    saved
+                }
+            if (!committed) {
+                requeuePersistence(work, "cancelled build metadata persistence failure")
+            } else if (successorPending) {
+                requeuePersistedSuccessor(work)
+            }
+            return
+        }
+
         val checkpoint = work.action.markReported(snapshot.version, commentId)
         if (persist(work.run)) return
 
         work.action.restorePending(checkpoint)
+        requeuePersistence(work, "build state persistence failure")
+    }
+
+    private fun requeuePersistence(
+        work: Work,
+        reason: String,
+    ) {
         val retryIndex = work.persistenceAttempt.coerceAtMost(PERSISTENCE_RETRY_DELAYS_SECONDS.lastIndex)
         val delayMillis = TimeUnit.SECONDS.toMillis(PERSISTENCE_RETRY_DELAYS_SECONDS[retryIndex])
         requeue(
@@ -406,8 +566,74 @@ internal class CnbBuildMetadataDispatchRuntime(
                 persistenceAttempt = (work.persistenceAttempt + 1).coerceAtMost(PERSISTENCE_RETRY_DELAYS_SECONDS.size),
                 notBeforeMillis = safeAddMillis(clockMillis(), delayMillis),
             ),
-            "build state persistence failure",
+            reason,
         )
+    }
+
+    private fun commitPersistedCancellationCleanup(work: Work) {
+        var successorPending = false
+        val committed =
+            synchronized(work.action) {
+                successorPending = work.action.isPending()
+                val saved = if (successorPending) persistCancellation(work) else removePersistedCancellation(work)
+                if (saved && successorPending) work.action.releaseItemPersistence()
+                saved
+            }
+        if (!committed) {
+            requeuePersistence(work, "cancelled build metadata cleanup failure")
+        } else if (successorPending) {
+            requeuePersistedSuccessor(work)
+        }
+    }
+
+    private fun discardPersistedCancellation(work: Work) {
+        if (!removePersistedCancellation(work)) {
+            requeuePersistence(work, "deleted cancelled metadata credential context cleanup failure")
+        }
+    }
+
+    private fun requeuePersistedSuccessor(work: Work) {
+        val snapshot = work.action.snapshot() ?: return
+        requeue(
+            work.copy(
+                attempt = 0,
+                persistenceAttempt = 0,
+                versionHint = snapshot.version,
+                notBeforeMillis = clockMillis(),
+                initialPersistenceRequired = false,
+            ),
+            "newer cancelled build metadata state",
+        )
+    }
+
+    private fun removePersistedCancellation(work: Work): Boolean {
+        val record = checkNotNull(work.cancelledRecord) { "Persisted cancellation work must retain its record" }
+        val store = checkNotNull(work.cancelledStore) { "Persisted cancellation work must retain its store" }
+        return try {
+            store.remove(record)
+            true
+        } catch (failure: Exception) {
+            LOGGER.log(
+                Level.WARNING,
+                "Unable to persist cancelled CNB build metadata acknowledgement (${failure.javaClass.simpleName})",
+            )
+            false
+        }
+    }
+
+    private fun persistCancellation(work: Work): Boolean {
+        val record = checkNotNull(work.cancelledRecord) { "Persisted cancellation work must retain its record" }
+        val store = checkNotNull(work.cancelledStore) { "Persisted cancellation work must retain its store" }
+        return try {
+            store.persist(record)
+            true
+        } catch (failure: Exception) {
+            LOGGER.log(
+                Level.WARNING,
+                "Unable to persist cancelled CNB build metadata state (${failure.javaClass.simpleName})",
+            )
+            false
+        }
     }
 
     private fun requeue(
@@ -522,7 +748,7 @@ internal class CnbBuildMetadataDispatchRuntime(
     }
 
     private fun logOverflow() {
-        recoveryRequests.request()
+        requestRecovery()
         val now = clockMillis()
         val next = nextOverflowLogMillis.get()
         if (now < next || !nextOverflowLogMillis.compareAndSet(next, safeAddMillis(now, OVERFLOW_LOG_INTERVAL_MILLIS))) return
@@ -595,20 +821,32 @@ internal class CnbBuildMetadataDispatchRuntime(
         val persistenceAttempt: Int,
         val versionHint: Long,
         val notBeforeMillis: Long,
+        val cancelledRecord: CnbCancelledBuildMetadataRecord?,
+        val cancelledStore: CnbCancelledBuildMetadataStore?,
+        val initialPersistenceRequired: Boolean,
     ) {
         val key: String
             get() = action.dispatchKey()
+
+        val persistedCancellation: Boolean
+            get() = cancelledRecord != null
 
         fun coalesce(candidate: Work): Work =
             if (candidate.versionHint > versionHint) {
                 candidate.copy(
                     item = candidate.item ?: item,
                     run = candidate.run ?: run,
+                    cancelledRecord = candidate.cancelledRecord ?: cancelledRecord,
+                    cancelledStore = candidate.cancelledStore ?: cancelledStore,
+                    initialPersistenceRequired = initialPersistenceRequired || candidate.initialPersistenceRequired,
                 )
             } else {
                 copy(
                     item = candidate.item ?: item,
                     run = candidate.run ?: run,
+                    cancelledRecord = candidate.cancelledRecord ?: cancelledRecord,
+                    cancelledStore = candidate.cancelledStore ?: cancelledStore,
+                    initialPersistenceRequired = initialPersistenceRequired || candidate.initialPersistenceRequired,
                 )
             }
 
@@ -624,8 +862,15 @@ internal class CnbBuildMetadataDispatchRuntime(
                 run: Run<*, *>?,
                 delaySeconds: Long,
                 nowMillis: Long,
+                cancelledRecord: CnbCancelledBuildMetadataRecord?,
+                cancelledStore: CnbCancelledBuildMetadataStore?,
+                initialPersistenceRequired: Boolean,
             ): Work? {
-                val snapshot = action.snapshot() ?: return null
+                val snapshot = action.snapshot()
+                if (snapshot == null && cancelledRecord == null) return null
+                require((cancelledRecord == null) == (cancelledStore == null)) {
+                    "Persisted cancellation work must retain both its record and store"
+                }
                 val safeDelayMillis = TimeUnit.SECONDS.toMillis(delaySeconds.coerceAtLeast(0L))
                 return Work(
                     action = action,
@@ -633,8 +878,11 @@ internal class CnbBuildMetadataDispatchRuntime(
                     run = run,
                     attempt = 0,
                     persistenceAttempt = 0,
-                    versionHint = snapshot.version,
+                    versionHint = snapshot?.version ?: action.version(),
                     notBeforeMillis = safeAddMillis(nowMillis, safeDelayMillis),
+                    cancelledRecord = cancelledRecord,
+                    cancelledStore = cancelledStore,
+                    initialPersistenceRequired = initialPersistenceRequired || action.itemPersistenceRequired(),
                 )
             }
         }

@@ -17,7 +17,6 @@ import java.util.Locale
 internal data class CnbVerifiedOpenPullRequestPush(
     val delivery: CnbWebhookDelivery,
     val snapshot: CnbLiveDeliverySnapshot,
-    val sourceCloneUrl: String,
 )
 
 /**
@@ -42,7 +41,7 @@ internal object CnbOpenPullRequestTargetPushResolver {
         }
 
         val targetSha = CnbGitObjectId.canonical(advertisedTargetSha)
-        val liveTarget = client.getBranch(targetRepository, targetBranch)
+        val liveTarget = missing { client.getBranch(targetRepository, targetBranch) } ?: return emptyList()
         if (liveTarget.name != targetBranch || !sameObjectId(liveTarget.sha, targetSha)) {
             throw CnbApiException(
                 "CNB target branch changed during open pull request verification",
@@ -54,11 +53,11 @@ internal object CnbOpenPullRequestTargetPushResolver {
         val result = ArrayList<CnbVerifiedOpenPullRequestPush>()
         for (listed in client.listPullRequests(targetRepository, CnbPullRequestListState.OPEN)) {
             if (!isListCandidate(listed, targetRepository, targetBranch)) continue
-            val current = missingOrUnauthorized { client.getPullRequest(targetRepository, listed.number) } ?: continue
+            val current = missing { client.getPullRequest(targetRepository, listed.number) } ?: continue
             if (!isCurrentCandidate(current, listed.number, targetRepository, targetBranch, targetSha)) continue
 
             val sourceBranch =
-                missingOrUnauthorized { client.getBranch(current.sourceRepo, current.sourceBranch) } ?: continue
+                missing { client.getBranch(current.sourceRepo, current.sourceBranch) } ?: continue
             if (sourceBranch.name != current.sourceBranch || !sameObjectId(sourceBranch.sha, current.sourceSha)) {
                 throw CnbApiException(
                     "CNB pull request source branch changed during verification",
@@ -68,15 +67,10 @@ internal object CnbOpenPullRequestTargetPushResolver {
             }
             val sourceSha = CnbGitObjectId.canonical(current.sourceSha)
             val normalized = current.copy(sourceSha = sourceSha, targetSha = targetSha, mergeSha = null)
-            val sourceRepository = missingOrUnauthorized { client.getRepository(normalized.sourceRepo) } ?: continue
-            if (sourceRepository.path != normalized.sourceRepo || !sourceRepository.cloneable || sourceRepository.cloneUrl.isBlank()) {
-                continue
-            }
-            val sourceCloneUrl = secureCloneUrl(sourceRepository.cloneUrl, normalized.sourceRepo, payload.instance.webUrl)
 
             val labels =
                 if (requirements.labels) {
-                    missingOrUnauthorized {
+                    failClosedOptional {
                         val names = LinkedHashSet<String>()
                         for (label in client.listPullLabels(targetRepository, normalized.number)) {
                             names.add(label.name)
@@ -88,12 +82,7 @@ internal object CnbOpenPullRequestTargetPushResolver {
                 }
             val commitMessage =
                 if (requirements.commitMessage) {
-                    missingOrUnauthorized {
-                        client
-                            .getCommit(normalized.sourceRepo, sourceSha)
-                            .takeIf { commit -> sameObjectId(commit.sha, sourceSha) }
-                            ?.message
-                    }
+                    resolveCommitMessage(client, normalized.sourceRepo, sourceSha)
                 } else {
                     null
                 }
@@ -116,7 +105,6 @@ internal object CnbOpenPullRequestTargetPushResolver {
                             labels = labels,
                             commitMessage = commitMessage,
                         ),
-                    sourceCloneUrl = sourceCloneUrl,
                 )
         }
         return result
@@ -165,13 +153,43 @@ internal object CnbOpenPullRequestTargetPushResolver {
             wip = draft,
         )
 
-    private inline fun <T> missingOrUnauthorized(block: () -> T): T? =
+    private inline fun <T> missing(block: () -> T): T? =
+        try {
+            block()
+        } catch (failure: CnbApiException) {
+            if (failure.statusCode != 404) throw failure
+            null
+        }
+
+    private inline fun <T> failClosedOptional(block: () -> T): T? =
         try {
             block()
         } catch (failure: CnbApiException) {
             if (failure.statusCode !in MISSING_OR_UNAUTHORIZED_STATUS_CODES) throw failure
             null
         }
+
+    private fun resolveCommitMessage(
+        client: CnbClient,
+        repository: String,
+        sha: String,
+    ): String {
+        val commit =
+            try {
+                client.getCommit(repository, sha)
+            } catch (failure: CnbApiException) {
+                if (failure.statusCode != 404) throw failure
+                return ""
+            }
+        if (!sameObjectId(commit.sha, sha)) {
+            throw CnbApiException(
+                "CNB returned commit metadata for a different pull request revision",
+                statusCode = 409,
+                retryable = true,
+            )
+        }
+        return commit.message
+    }
 
     private fun sameObjectId(
         actual: String,
@@ -180,7 +198,7 @@ internal object CnbOpenPullRequestTargetPushResolver {
         CnbGitObjectId.isPresent(actual) &&
             CnbGitObjectId.canonical(actual) == CnbGitObjectId.canonical(expected)
 
-    private fun secureCloneUrl(
+    internal fun secureCloneUrl(
         value: String,
         repositoryPath: String,
         webOrigin: String,

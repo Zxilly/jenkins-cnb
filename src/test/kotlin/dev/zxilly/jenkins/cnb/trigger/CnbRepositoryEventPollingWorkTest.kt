@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
@@ -359,6 +360,13 @@ class CnbRepositoryEventPollingWorkTest {
             ),
             plan.completedHours,
         )
+        assertEquals(
+            listOf(
+                Instant.parse("2026-07-15T09:00:00Z"),
+                Instant.parse("2026-07-15T10:00:00Z"),
+            ),
+            plan.replayHours,
+        )
         assertNull(plan.currentHour)
     }
 
@@ -367,7 +375,37 @@ class CnbRepositoryEventPollingWorkTest {
         val plan = repositoryEventPollPlan(null, Instant.parse("2026-07-15T15:42:00Z"))
 
         assertEquals(listOf(Instant.parse("2026-07-15T14:00:00Z")), plan.completedHours)
+        assertEquals(emptyList<Instant>(), plan.replayHours)
         assertEquals(Instant.parse("2026-07-15T15:00:00Z"), plan.currentHour)
+    }
+
+    @Test
+    fun `checkpointed polling replays a bounded completed-hour window with the open hour`() {
+        val plan =
+            repositoryEventPollPlan(
+                Instant.parse("2026-07-15T14:00:00Z"),
+                Instant.parse("2026-07-15T15:42:00Z"),
+            )
+
+        assertEquals(emptyList<Instant>(), plan.completedHours)
+        assertEquals(
+            listOf(
+                Instant.parse("2026-07-15T13:00:00Z"),
+                Instant.parse("2026-07-15T14:00:00Z"),
+            ),
+            plan.replayHours,
+        )
+        assertEquals(Instant.parse("2026-07-15T15:00:00Z"), plan.currentHour)
+    }
+
+    @Test
+    fun `interrupted polling failures escape with the interrupt flag restored`() {
+        Thread.interrupted()
+        val failure = IOException("poll failed", InterruptedException("controller is stopping"))
+
+        assertThrows(IOException::class.java) { failure.propagateInterruption() }
+
+        assertTrue(Thread.interrupted())
     }
 
     @Test
@@ -516,7 +554,79 @@ class CnbRepositoryEventPollingWorkTest {
     }
 
     @Test
-    fun `failed consumer is retried without repeating a successful consumer`() {
+    fun `processor durably acknowledges successful event keys from a partial batch`() {
+        val now = Instant.parse("2026-07-15T10:30:00Z")
+        val first = event("PushEvent", CnbRepositoryEventPayload(ref = "refs/heads/main")).copy(id = "event-1")
+        val second = event("PushEvent", CnbRepositoryEventPayload(ref = "refs/heads/release")).copy(id = "event-2")
+        val store = CnbRepositoryEventDedupStore(directory.resolve("partial-batch.properties"))
+        var dispatched = emptyList<String>()
+        val secondKey = CnbRepositoryEventPollingWork.eventKey("primary", "team/project", second)
+
+        assertThrows(CnbPartialRepositoryEventDispatchException::class.java) {
+            CnbRepositoryEventHourProcessor.process(
+                "primary",
+                "team/project",
+                listOf(first, second),
+                now,
+                store,
+            ) { events ->
+                dispatched = events.map { it.id }
+                throw CnbPartialRepositoryEventDispatchException(
+                    setOf(secondKey),
+                    IllegalStateException("queue refused second ref"),
+                )
+            }
+        }
+
+        assertEquals(listOf("event-1", "event-2"), dispatched)
+        assertTrue(store.contains("primary", "team/project", CnbRepositoryEventPollingWork.eventKey("primary", "team/project", first), now))
+        assertFalse(store.contains("primary", "team/project", secondKey, now))
+    }
+
+    @Test
+    fun `unseen lifecycle event carries seen events for the same ref as dispatch context`() {
+        val now = Instant.parse("2026-07-15T10:30:00Z")
+        val sha = "a".repeat(40)
+        val first =
+            event("PushEvent", CnbRepositoryEventPayload(ref = "refs/heads/main", head = sha))
+                .copy(id = "1", createdAt = "2026-07-15T10:15:00Z")
+        val lateDelete =
+            event(
+                "DeleteEvent",
+                CnbRepositoryEventPayload(ref = "main", refType = CnbRepositoryRefType.BRANCH),
+            ).copy(id = "2", createdAt = "2026-07-15T10:16:00Z")
+        val recreated = first.copy(id = "3", createdAt = "2026-07-15T10:17:00Z")
+        val unrelated =
+            first.copy(
+                id = "4",
+                createdAt = "2026-07-15T10:18:00Z",
+                payload = first.payload.copy(ref = "refs/heads/release"),
+            )
+        val store = CnbRepositoryEventDedupStore(directory.resolve("lifecycle-context.properties"))
+        val seenKeys =
+            listOf(first, recreated, unrelated).map {
+                CnbRepositoryEventPollingWork.eventKey("primary", "team/project", it)
+            }
+        store.mark("primary", "team/project", seenKeys, now)
+        var dispatched = emptyList<String>()
+
+        val handled =
+            CnbRepositoryEventHourProcessor.process(
+                "primary",
+                "team/project",
+                listOf(first, lateDelete, recreated, unrelated),
+                now,
+                store,
+            ) { events -> dispatched = events.map { it.id } }
+
+        assertEquals(1, handled)
+        assertEquals(listOf("1", "2", "3"), dispatched)
+        val deleteKey = CnbRepositoryEventPollingWork.eventKey("primary", "team/project", lateDelete)
+        assertTrue(store.contains("primary", "team/project", deleteKey, now))
+    }
+
+    @Test
+    fun `checked API failure in one consumer is retried without blocking a successful consumer`() {
         val now = Instant.parse("2026-07-15T10:30:00Z")
         val event = event("PushEvent", CnbRepositoryEventPayload(ref = "refs/heads/main"))
         val store = CnbRepositoryEventDedupStore(directory.resolve("isolated-consumer.properties"))
@@ -525,7 +635,9 @@ class CnbRepositoryEventPollingWorkTest {
         val failedConsumer =
             CnbRepositoryEventConsumer("0:broken", "broken source") {
                 failedConsumerAttempts++
-                if (failedConsumerAttempts == 1) throw IllegalStateException("source refresh failed")
+                if (failedConsumerAttempts == 1) {
+                    throw CnbApiException("source authorization failed", statusCode = 403)
+                }
             }
         val successfulConsumer =
             CnbRepositoryEventConsumer("1:healthy", "healthy job") { successfulDispatches++ }

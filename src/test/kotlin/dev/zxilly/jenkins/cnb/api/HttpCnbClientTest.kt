@@ -915,8 +915,20 @@ class HttpCnbClientTest {
     @Test
     fun `adds replaces and removes pull labels with bounded JSON bodies`() {
         handlers["/org/repo/-/pulls/7/labels"] = { exchange ->
-            val name = if (exchange.requestMethod == "POST") "added" else "replacement"
-            respond(exchange, 200, """{"id":"label-$name","name":"$name","future":true}""")
+            when {
+                exchange.requestMethod == "GET" && query(exchange.requestURI.rawQuery)["page"] == "1" -> {
+                    respond(exchange, 200, """[{"id":"label-remove","name":"needs review"}]""")
+                }
+
+                exchange.requestMethod == "GET" -> {
+                    respond(exchange, 200, "[]")
+                }
+
+                else -> {
+                    val name = if (exchange.requestMethod == "POST") "added" else "replacement"
+                    respond(exchange, 200, """{"id":"label-$name","name":"$name","future":true}""")
+                }
+            }
         }
         handlers["/org/repo/-/pulls/7/labels/needs review"] = { exchange ->
             respond(exchange, 200, """{"id":"label-remove","name":"needs review"}""")
@@ -935,6 +947,82 @@ class HttpCnbClientTest {
         assertTrue(requests[1].body.contains("\"replacement\""))
         assertTrue(requests[1].body.contains("\"security\""))
         assertTrue(requests.last().rawPath.endsWith("/needs%20review"))
+    }
+
+    @Test
+    fun `remove pull label returns the cached label when an ambiguous retry finds it already absent`() {
+        val attempts = AtomicInteger()
+        handlers["/org/repo/-/pulls/7/labels"] = { exchange ->
+            val body =
+                if (query(exchange.requestURI.rawQuery)["page"] == "1") {
+                    """[{"id":"label-remove","name":"needs review","color":"#00ff00","description":"Ready"}]"""
+                } else {
+                    "[]"
+                }
+            respond(exchange, 200, body)
+        }
+        handlers["/org/repo/-/pulls/7/labels/needs review"] = { exchange ->
+            if (attempts.incrementAndGet() == 1) {
+                exchange.close()
+            } else {
+                respond(exchange, 404, """{"errcode":404,"errmsg":"label not found"}""")
+            }
+        }
+
+        val removed = client.removePullLabel("org/repo", "7", "needs review")
+
+        assertEquals("label-remove", removed.id)
+        assertEquals("needs review", removed.name)
+        assertEquals("#00ff00", removed.color)
+        assertEquals("Ready", removed.description)
+        assertEquals(2, requests.count { it.method == "GET" })
+        assertEquals(2, requests.count { it.method == "DELETE" })
+    }
+
+    @Test
+    fun `remove pull label keeps an initial not found response as an error`() {
+        handlers["/org/repo/-/pulls/7/labels"] = { exchange ->
+            val body =
+                if (query(exchange.requestURI.rawQuery)["page"] == "1") {
+                    """[{"id":"label-remove","name":"needs review"}]"""
+                } else {
+                    "[]"
+                }
+            respond(exchange, 200, body)
+        }
+        handlers["/org/repo/-/pulls/7/labels/needs review"] = { exchange ->
+            respond(exchange, 404, """{"errcode":404,"errmsg":"label not found"}""")
+        }
+
+        val failure =
+            assertThrows(CnbApiException::class.java) {
+                client.removePullLabel("org/repo", "7", "needs review")
+            }
+
+        assertEquals(404, failure.statusCode)
+        assertEquals(1, requests.count { it.method == "DELETE" })
+    }
+
+    @Test
+    fun `remove pull label does not invent success without a cached matching label`() {
+        val attempts = AtomicInteger()
+        handlers["/org/repo/-/pulls/7/labels"] = { exchange -> respond(exchange, 200, "[]") }
+        handlers["/org/repo/-/pulls/7/labels/needs review"] = { exchange ->
+            if (attempts.incrementAndGet() == 1) {
+                exchange.close()
+            } else {
+                respond(exchange, 404, """{"errcode":404,"errmsg":"label not found"}""")
+            }
+        }
+
+        val failure =
+            assertThrows(CnbApiException::class.java) {
+                client.removePullLabel("org/repo", "7", "needs review")
+            }
+
+        assertEquals(404, failure.statusCode)
+        assertEquals(1, requests.count { it.method == "GET" })
+        assertEquals(2, requests.count { it.method == "DELETE" })
     }
 
     @Test
@@ -1238,6 +1326,19 @@ class HttpCnbClientTest {
 
         assertTrue(error.message.orEmpty().contains("pagination byte limit"))
         assertEquals(5, requests.size)
+    }
+
+    @Test
+    fun `rejects one API response before it can exceed the pagination byte budget`() {
+        val padding = "x".repeat(16 * 1024 * 1024)
+        handlers["/user/repos"] = { exchange ->
+            respond(exchange, 200, """[{"id":"1","path":"org/one","padding":"$padding"}]""")
+        }
+
+        val error = assertThrows(CnbApiException::class.java) { client.listUserRepositories() }
+
+        assertTrue(error.message.orEmpty().contains("response exceeded"))
+        assertEquals(1, requests.size)
     }
 
     @Test
@@ -2289,6 +2390,55 @@ class HttpCnbClientTest {
         assertTrue(update.body.contains("\"draft\":true"))
         assertTrue(update.body.contains("\"make_latest\":\"false\""))
         assertEquals(2, requests.count { it.method == "DELETE" })
+    }
+
+    @Test
+    fun `idempotent no-content delete converges when an ambiguous retry finds the resource absent`() {
+        val attempts = AtomicInteger()
+        handlers["/org/repo/-/releases/release-1"] = { exchange ->
+            if (attempts.incrementAndGet() == 1) {
+                exchange.close()
+            } else {
+                respond(exchange, 404, """{"errcode":404,"errmsg":"release not found"}""")
+            }
+        }
+
+        client.deleteRelease("org/repo", "release-1")
+
+        assertEquals(2, requests.size)
+        assertTrue(requests.all { it.method == "DELETE" })
+    }
+
+    @Test
+    fun `idempotent no-content delete converges when a retryable response is followed by not found`() {
+        val attempts = AtomicInteger()
+        handlers["/org/repo/-/releases/release-1"] = { exchange ->
+            if (attempts.incrementAndGet() == 1) {
+                respond(exchange, 503, """{"errcode":503,"errmsg":"result unavailable"}""")
+            } else {
+                respond(exchange, 404, """{"errcode":404,"errmsg":"release not found"}""")
+            }
+        }
+
+        client.deleteRelease("org/repo", "release-1")
+
+        assertEquals(2, requests.size)
+        assertTrue(requests.all { it.method == "DELETE" })
+    }
+
+    @Test
+    fun `idempotent no-content delete keeps an initial not found response as an error`() {
+        handlers["/org/repo/-/releases/release-1"] = { exchange ->
+            respond(exchange, 404, """{"errcode":404,"errmsg":"release not found"}""")
+        }
+
+        val failure =
+            assertThrows(CnbApiException::class.java) {
+                client.deleteRelease("org/repo", "release-1")
+            }
+
+        assertEquals(404, failure.statusCode)
+        assertEquals(1, requests.size)
     }
 
     @Test

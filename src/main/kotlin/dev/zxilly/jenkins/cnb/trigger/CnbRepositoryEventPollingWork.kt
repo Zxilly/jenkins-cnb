@@ -2,6 +2,7 @@ package dev.zxilly.jenkins.cnb.trigger
 
 import dev.zxilly.jenkins.cnb.api.CnbApiException
 import dev.zxilly.jenkins.cnb.api.CnbClientFactory
+import dev.zxilly.jenkins.cnb.api.model.CnbCommit
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryEvent
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryRefType
 import dev.zxilly.jenkins.cnb.config.CnbGlobalConfiguration
@@ -9,6 +10,7 @@ import dev.zxilly.jenkins.cnb.health.CnbOperationalHealth
 import dev.zxilly.jenkins.cnb.scm.CnbSCMSource
 import dev.zxilly.jenkins.cnb.webhook.CnbWebhookEvent
 import hudson.Extension
+import hudson.model.Action
 import hudson.model.AsyncPeriodicWork
 import hudson.model.Cause
 import hudson.model.CauseAction
@@ -22,12 +24,14 @@ import jenkins.scm.api.SCMSourceOwner
 import jenkins.scm.api.SCMSourceOwners
 import java.io.Closeable
 import java.io.IOException
+import java.io.InterruptedIOException
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
+import java.time.OffsetDateTime
 import java.time.ZoneOffset
 import java.time.ZonedDateTime
 import java.time.temporal.ChronoUnit
@@ -87,9 +91,11 @@ class CnbRepositoryEventPollingWork
                         summary = "processed=$handled",
                     )
                 } catch (failure: IOException) {
+                    failure.propagateInterruption()
                     recordPollingFailure(repository, failure)
                     reportFailure(repository, failure, listener)
                 } catch (failure: RuntimeException) {
+                    failure.propagateInterruption()
                     recordPollingFailure(repository, failure)
                     reportFailure(repository, failure, listener)
                 }
@@ -114,35 +120,40 @@ class CnbRepositoryEventPollingWork
                 candidates = repository.credentialCandidates,
                 openSession = ::openSession,
             ).use { client ->
-                for (hour in plan.completedHours) {
-                    val handled = pollHour(repository, hour, now, client::listRepositoryEvents, dedupStore)
-                    cursorStore.advance(repository.cursorScope(), hour)
-                    logHandled(repository, hour, handled, listener)
-                    handledTotal += handled
-                }
-
-                plan.currentHour?.let { hour ->
-                    val handled = pollHour(repository, hour, now, client::listRepositoryEvents, dedupStore)
-                    logHandled(repository, hour, handled, listener)
+                val hoursToPoll =
+                    (plan.replayHours + plan.completedHours + listOfNotNull(plan.currentHour))
+                        .distinct()
+                        .sorted()
+                if (hoursToPoll.isNotEmpty()) {
+                    val handled = pollHours(repository, hoursToPoll, now, client::listRepositoryEvents, dedupStore)
+                    for (hour in plan.completedHours) {
+                        cursorStore.advance(repository.cursorScope(), hour)
+                    }
+                    logHandled(repository, hoursToPoll.first(), handled, listener)
                     handledTotal += handled
                 }
             }
             return handledTotal
         }
 
-        private fun pollHour(
+        private fun pollHours(
             repository: CnbWatchedRepository,
-            hour: Instant,
+            hours: List<Instant>,
             now: Instant,
             fetch: (String, ZonedDateTime) -> List<CnbRepositoryEvent>,
             dedupStore: CnbRepositoryEventDedupStore,
         ): Int {
-            val events = fetch(repository.repositoryPath, ZonedDateTime.ofInstant(hour, ZoneOffset.UTC))
+            val events = ArrayList<CnbRepositoryEvent>()
+            for (hour in hours) {
+                events += fetch(repository.repositoryPath, ZonedDateTime.ofInstant(hour, ZoneOffset.UTC))
+            }
             return CnbRepositoryEventDispatcher.dispatch(repository, events, now, dedupStore)
         }
 
         private fun watchedRepositories(dueServerIds: Set<String>): List<CnbWatchedRepository> {
             val watches = ArrayList<CnbRepositoryEventWatch>()
+            val commitCache = HashMap<Triple<String, String, String>, CnbCommit?>()
+            val cloneUrlCache = HashMap<Pair<String, String>, String?>()
             for (owner in SCMSourceOwners.all()) {
                 for (source in owner.scmSources) {
                     val cnb = source as? CnbSCMSource ?: continue
@@ -194,7 +205,7 @@ class CnbRepositoryEventPollingWork
                         repositoryPath = repositoryPath,
                         consumer =
                             CnbRepositoryEventConsumer(
-                                stableKey = "1\u0000${candidate.fullName}",
+                                stableKey = classicJobEventConsumerScope(candidate),
                                 description = "job ${candidate.fullName}",
                             ) { events ->
                                 CnbPushTriggerRecovery.recover(
@@ -203,6 +214,26 @@ class CnbRepositoryEventPollingWork
                                     events,
                                     candidate,
                                     trigger,
+                                    getCommit = { repository, commit ->
+                                        val key = Triple(serverId, repository, commit.lowercase(Locale.ROOT))
+                                        if (commitCache.containsKey(key)) {
+                                            commitCache[key]
+                                        } else {
+                                            CnbPushTriggerRecovery
+                                                .verifiedCommit(serverId, repository, commit)
+                                                .also { commitCache[key] = it }
+                                        }
+                                    },
+                                    loadSourceCloneUrl = {
+                                        val key = serverId to repositoryPath
+                                        if (cloneUrlCache.containsKey(key)) {
+                                            cloneUrlCache[key]
+                                        } else {
+                                            CnbPushTriggerRecovery
+                                                .verifiedCloneUrl(serverId, repositoryPath)
+                                                .also { cloneUrlCache[key] = it }
+                                        }
+                                    },
                                 )
                             },
                         credentialCandidates = listOf(CnbRepositoryEventCredentialCandidate.server()),
@@ -291,6 +322,7 @@ class CnbRepositoryEventPollingWork
             private val HEALTH_CLASS_BOUNDARY = Regex("(?<=[a-z0-9])(?=[A-Z])")
             private val LOGGER = Logger.getLogger(CnbRepositoryEventPollingWork::class.java.name)
             internal const val MAX_COMPLETED_HOURS_PER_RUN = 24
+            internal const val REPLAY_COMPLETED_HOURS = 2
 
             internal fun eventKey(
                 serverId: String,
@@ -597,6 +629,7 @@ internal class CnbRepositoryEventPollCycle(
 
 internal data class CnbRepositoryEventPollPlan(
     val completedHours: List<Instant>,
+    val replayHours: List<Instant>,
     val currentHour: Instant?,
 )
 
@@ -604,8 +637,10 @@ internal fun repositoryEventPollPlan(
     cursor: Instant?,
     now: Instant,
     maxCompletedHours: Int = CnbRepositoryEventPollingWork.MAX_COMPLETED_HOURS_PER_RUN,
+    replayCompletedHours: Int = CnbRepositoryEventPollingWork.REPLAY_COMPLETED_HOURS,
 ): CnbRepositoryEventPollPlan {
     require(maxCompletedHours > 0) { "maxCompletedHours must be positive" }
+    require(replayCompletedHours >= 0) { "replayCompletedHours must not be negative" }
     val currentHour = now.truncatedTo(ChronoUnit.HOURS)
     val latestCompletedHour = currentHour.minus(1, ChronoUnit.HOURS)
     val safeCursor = cursor?.takeUnless { it.isAfter(latestCompletedHour) }
@@ -616,8 +651,15 @@ internal fun repositoryEventPollPlan(
         nextHour = nextHour.plus(1, ChronoUnit.HOURS)
     }
     val latestPlanned = completed.lastOrNull() ?: safeCursor
+    val replay = ArrayList<Instant>(replayCompletedHours)
+    if (safeCursor != null) {
+        for (offset in replayCompletedHours - 1 downTo 0) {
+            replay += safeCursor.minus(offset.toLong(), ChronoUnit.HOURS)
+        }
+    }
     return CnbRepositoryEventPollPlan(
         completedHours = completed,
+        replayHours = replay,
         currentHour = currentHour.takeIf { latestPlanned == latestCompletedHour },
     )
 }
@@ -627,6 +669,14 @@ internal object CnbRepositoryEventClassifier {
         BRANCH,
         TAG,
     }
+
+    data class RefTransition(
+        val event: CnbRepositoryEvent,
+        val ref: String,
+        val kind: RefKind,
+        val commit: String?,
+        val lifecycle: CnbRefLifecycleTransition,
+    )
 
     fun isRelevant(event: CnbRepositoryEvent): Boolean =
         when (event.type.wireValue.lowercase(Locale.ROOT)) {
@@ -678,6 +728,87 @@ internal object CnbRepositoryEventClassifier {
                 value.all { it in '0'..'9' || it.lowercaseChar() in 'a'..'f' }
         }
     }
+
+    fun isPushDeletion(event: CnbRepositoryEvent): Boolean {
+        if (!event.type.wireValue.equals("PushEvent", ignoreCase = true)) return false
+        val head = event.payload.head.trim()
+        return head.length in GIT_OBJECT_ID_LENGTHS && head.all { it == '0' }
+    }
+
+    fun refTransition(
+        serverId: String,
+        repositoryPath: String,
+        event: CnbRepositoryEvent,
+    ): RefTransition? {
+        val type = event.type.wireValue.lowercase(Locale.ROOT)
+        val ref: String
+        val kind: RefKind
+        val commit: String?
+        val present: Boolean
+        when (type) {
+            "pushevent" -> {
+                ref = pushRef(event) ?: return null
+                kind = pushRefKind(event) ?: return null
+                commit = pushCommit(event)
+                present = commit != null
+                if (!present && !isPushDeletion(event)) return null
+            }
+
+            "deleteevent" -> {
+                ref = normalizedRef(event.payload.ref) ?: return null
+                kind =
+                    when (event.payload.refType) {
+                        CnbRepositoryRefType.BRANCH -> RefKind.BRANCH
+                        CnbRepositoryRefType.TAG -> RefKind.TAG
+                        else -> return null
+                    }
+                val raw = event.payload.ref.trim()
+                if (raw.startsWith("refs/heads/") && kind != RefKind.BRANCH) return null
+                if (raw.startsWith("refs/tags/") && kind != RefKind.TAG) return null
+                commit = null
+                present = false
+            }
+
+            else -> {
+                return null
+            }
+        }
+        val occurredAt = parseCreatedAt(event.createdAt) ?: return null
+        val qualifiedRef = if (kind == RefKind.TAG) "refs/tags/$ref" else "refs/heads/$ref"
+        return RefTransition(
+            event,
+            ref,
+            kind,
+            commit,
+            CnbRefLifecycleTransition(
+                qualifiedRef,
+                present,
+                occurredAt,
+                stableLifecycleEventId(
+                    event.id,
+                    CnbRepositoryEventPollingWork.eventKey(serverId, repositoryPath, event),
+                ),
+            ),
+        )
+    }
+
+    private fun normalizedRef(rawValue: String): String? {
+        val raw = rawValue.trim()
+        val normalized =
+            when {
+                raw.startsWith("refs/heads/") -> raw.removePrefix("refs/heads/")
+                raw.startsWith("refs/tags/") -> raw.removePrefix("refs/tags/")
+                else -> raw
+            }.trim()
+        return normalized.takeIf {
+            it.isNotEmpty() && it.length <= 1024 && it.none { character -> character.code < 0x20 || character.code == 0x7f }
+        }
+    }
+
+    private fun parseCreatedAt(value: String): Instant? =
+        runCatching { Instant.parse(value) }
+            .recoverCatching { OffsetDateTime.parse(value).toInstant() }
+            .getOrNull()
 
     private val CODE_REF_TYPES = setOf(CnbRepositoryRefType.BRANCH, CnbRepositoryRefType.TAG)
     private val GIT_OBJECT_ID_LENGTHS = setOf(40, 64)
@@ -734,17 +865,51 @@ internal object CnbRepositoryEventHourProcessor {
         }
         val unseenKeys = unseen(eventsByKey.keys)
         val unseenEvents = ArrayList<CnbRepositoryEvent>(unseenKeys.size)
+        val lifecycleRefs = HashSet<String>()
         for (key in unseenKeys) {
             val event = eventsByKey[key] ?: continue
             unseenEvents += event
+            CnbRepositoryEventClassifier
+                .refTransition(serverId, repositoryPath, event)
+                ?.lifecycle
+                ?.qualifiedRef
+                ?.let(lifecycleRefs::add)
         }
         if (unseenEvents.isEmpty()) return 0
 
-        dispatch(unseenEvents)
+        // A late tombstone can change the generation of a newer, already acknowledged push.
+        val dispatchEvents = ArrayList<CnbRepositoryEvent>(eventsByKey.size)
+        if (lifecycleRefs.isEmpty()) {
+            dispatchEvents.addAll(unseenEvents)
+        } else {
+            for ((key, event) in eventsByKey) {
+                if (key in unseenKeys) {
+                    dispatchEvents += event
+                    continue
+                }
+                val qualifiedRef =
+                    CnbRepositoryEventClassifier
+                        .refTransition(serverId, repositoryPath, event)
+                        ?.lifecycle
+                        ?.qualifiedRef
+                if (qualifiedRef != null && qualifiedRef in lifecycleRefs) dispatchEvents += event
+            }
+        }
+        try {
+            dispatch(dispatchEvents)
+        } catch (failure: CnbPartialRepositoryEventDispatchException) {
+            mark(unseenKeys - failure.retryKeys)
+            throw failure
+        }
         mark(unseenKeys)
         return unseenEvents.size
     }
 }
+
+internal class CnbPartialRepositoryEventDispatchException(
+    val retryKeys: Set<String>,
+    cause: Exception,
+) : RuntimeException("CNB repository event dispatch partially failed", cause)
 
 /**
  * Dispatches and durably deduplicates a recovered batch independently for every authorized
@@ -769,7 +934,8 @@ internal object CnbRepositoryEventDispatcher {
                         store,
                         consumer.dispatch,
                     )
-            } catch (failure: RuntimeException) {
+            } catch (failure: Exception) {
+                failure.propagateInterruption()
                 LOGGER.log(
                     Level.WARNING,
                     "CNB polling consumer {0} failed for {1}/{2}; its event scope will be retried",
@@ -806,59 +972,119 @@ internal object CnbPushTriggerRecovery {
         events: List<CnbRepositoryEvent>,
         candidate: Job<*, *>,
         trigger: CnbPushTrigger,
+        getCommit: (String, String) -> CnbCommit? = { repository, commit ->
+            verifiedCommit(serverId, repository, commit)
+        },
+        loadSourceCloneUrl: () -> String? = { verifiedCloneUrl(serverId, repositoryPath) },
+        lifecycleStore: CnbRefLifecycleStore = CnbRefLifecycleStores.current(),
     ) {
-        data class RecoveredPush(
-            val event: CnbRepositoryEvent,
-            val ref: String,
-            val commit: String,
-            val kind: CnbRepositoryEventClassifier.RefKind,
-        )
-
-        val pushesByRef = linkedMapOf<String, RecoveredPush>()
+        val pushesByRef = linkedMapOf<String, MutableList<CnbRepositoryEventClassifier.RefTransition>>()
         events.forEach { event ->
-            val ref = CnbRepositoryEventClassifier.pushRef(event) ?: return@forEach
-            val commit = CnbRepositoryEventClassifier.pushCommit(event) ?: return@forEach
-            val kind = CnbRepositoryEventClassifier.pushRefKind(event) ?: return@forEach
-            val qualifiedRef = if (kind == CnbRepositoryEventClassifier.RefKind.TAG) "refs/tags/$ref" else "refs/heads/$ref"
-            pushesByRef[qualifiedRef] = RecoveredPush(event, ref, commit, kind)
+            val transition = CnbRepositoryEventClassifier.refTransition(serverId, repositoryPath, event) ?: return@forEach
+            pushesByRef.getOrPut(transition.lifecycle.qualifiedRef) { ArrayList() } += transition
         }
         if (pushesByRef.isEmpty()) return
-        if (!candidate.isBuildable) return
 
         var schedulingFailure: RuntimeException? = null
-        for ((qualifiedRef, push) in pushesByRef) {
-            val event = if (push.kind == CnbRepositoryEventClassifier.RefKind.TAG) CnbWebhookEvent.TAG_PUSH else CnbWebhookEvent.PUSH
-            if (!CnbEventFilter.matches(trigger.getEventFilter(), event)) continue
-            val matches =
-                try {
-                    CnbRefGlob.matches(trigger.getRefFilter(), push.ref)
-                } catch (failure: IllegalArgumentException) {
-                    LOGGER.log(Level.WARNING, "Invalid CNB branch filter on ${candidate.fullName}", failure)
-                    false
-                }
-            if (!matches) continue
-            try {
-                val identity = CnbQueueIdentity(serverId, repositoryPath, qualifiedRef, push.commit.lowercase(Locale.ROOT))
-                if (trigger.isCancelPendingBuildsOnUpdate()) {
-                    val task = candidate as? Queue.Task ?: continue
-                    CnbPendingBuilds.cancelSuperseded(Queue.getInstance(), task, identity)
-                }
-                ParameterizedJobMixIn.scheduleBuild2(
-                    candidate,
-                    0,
-                    CauseAction(
-                        CnbRepositoryEventCause(
-                            serverId,
-                            repositoryPath,
-                            push.event,
-                            push.ref,
-                            push.commit,
-                            tag = push.kind == CnbRepositoryEventClassifier.RefKind.TAG,
-                        ),
-                    ),
-                    CnbQueueAction(identity),
+        val retryKeys = linkedSetOf<String>()
+        val lifecycleScope = classicJobRefLifecycleScope(serverId, repositoryPath, candidate)
+        for ((_, unordered) in pushesByRef) {
+            val recovered =
+                unordered.sortedWith(
+                    Comparator { left, right ->
+                        val time = left.lifecycle.occurredAt.compareTo(right.lifecycle.occurredAt)
+                        if (time != 0) {
+                            time
+                        } else {
+                            compareLifecycleEventIds(left.lifecycle.stableEventId, right.lifecycle.stableEventId)
+                        }
+                    },
                 )
-            } catch (failure: RuntimeException) {
+            try {
+                val scopedTransitions =
+                    ArrayList<CnbScopedRefLifecycleTransition>(recovered.size)
+                for (transition in recovered) {
+                    scopedTransitions += CnbScopedRefLifecycleTransition(lifecycleScope, transition.lifecycle)
+                }
+                val lifecycleResults =
+                    lifecycleStore.apply(scopedTransitions)
+                val push = recovered.last()
+                val lifecycle = lifecycleResults.last()
+                val pushCommit = push.commit
+                if (!lifecycle.current || !lifecycle.present || pushCommit == null || !candidate.isBuildable) continue
+                val event = if (push.kind == CnbRepositoryEventClassifier.RefKind.TAG) CnbWebhookEvent.TAG_PUSH else CnbWebhookEvent.PUSH
+                if (!CnbEventFilter.matches(trigger.getEventFilter(), event)) continue
+                val matches =
+                    try {
+                        CnbRefGlob.matches(trigger.getRefFilter(), push.ref)
+                    } catch (failure: IllegalArgumentException) {
+                        LOGGER.log(Level.WARNING, "Invalid CNB branch filter on ${candidate.fullName}", failure)
+                        false
+                    }
+                if (!matches) continue
+                val identity =
+                    CnbQueueIdentity(
+                        serverId,
+                        repositoryPath,
+                        push.lifecycle.qualifiedRef,
+                        pushCommit.lowercase(Locale.ROOT),
+                        refGeneration = lifecycle.generation,
+                    )
+                if (trigger.isCiSkip()) {
+                    val commit = getCommit(repositoryPath, identity.sha)
+                    if (commit != null) {
+                        if (!commit.sha.equals(identity.sha, ignoreCase = true)) {
+                            throw IllegalStateException("CNB returned commit metadata for a different revision")
+                        }
+                        if (CnbCiSkip.matches(commit.message)) continue
+                    }
+                }
+                val requiresCheckout = CnbClassicGitRevisionAction.supports(candidate)
+                val checkoutAction =
+                    if (requiresCheckout) {
+                        loadSourceCloneUrl()
+                            ?.let { CnbClassicGitRevisionAction.create(candidate, identity.sha, it) }
+                            ?: continue
+                    } else {
+                        null
+                    }
+                val historyQuery =
+                    CnbDeliveryHistory.Query(
+                        job = candidate,
+                        incoming = identity,
+                        deliveryId = null,
+                        deliveryScope = null,
+                        deduplicateRevision = true,
+                    )
+                CnbDeliveryHistory.withStableQueue(listOf(historyQuery)) { queue, histories ->
+                    if (CnbDeliveryHistory.contains(queue, histories.single())) return@withStableQueue
+                    val actions =
+                        arrayListOf<Action>(
+                            CauseAction(
+                                CnbRepositoryEventCause(
+                                    serverId,
+                                    repositoryPath,
+                                    push.event,
+                                    push.ref,
+                                    pushCommit,
+                                    tag = push.kind == CnbRepositoryEventClassifier.RefKind.TAG,
+                                ),
+                            ),
+                            CnbQueueAction(identity),
+                        )
+                    checkoutAction?.let(actions::add)
+                    ParameterizedJobMixIn.scheduleBuild2(candidate, 0, *actions.toTypedArray())
+                        ?: throw IllegalStateException("Jenkins refused the recovered CNB event build")
+                    if (trigger.isCancelPendingBuildsOnUpdate()) {
+                        val queueTask = candidate as? Queue.Task ?: return@withStableQueue
+                        CnbPendingBuilds.cancelSuperseded(queue, queueTask, identity)
+                    }
+                }
+            } catch (failure: Exception) {
+                failure.propagateInterruption()
+                for (attempt in recovered) {
+                    retryKeys += CnbRepositoryEventPollingWork.eventKey(serverId, repositoryPath, attempt.event)
+                }
                 schedulingFailure =
                     combineFailure(
                         schedulingFailure,
@@ -867,7 +1093,30 @@ internal object CnbPushTriggerRecovery {
                     )
             }
         }
-        schedulingFailure?.let { throw it }
+        schedulingFailure?.let { throw CnbPartialRepositoryEventDispatchException(retryKeys, it) }
+    }
+
+    internal fun verifiedCommit(
+        serverId: String,
+        repositoryPath: String,
+        commit: String,
+    ): CnbCommit? =
+        try {
+            CnbClientFactory.create(serverId).use { client -> client.getCommit(repositoryPath, commit) }
+        } catch (failure: CnbApiException) {
+            if (failure.statusCode != 404) throw failure
+            // A missing commit cannot prove [skip ci]; fail open instead of losing the archived build.
+            null
+        }
+
+    internal fun verifiedCloneUrl(
+        serverId: String,
+        repositoryPath: String,
+    ): String? {
+        val server = CnbGlobalConfiguration.get().getServers().firstOrNull { it.id == serverId } ?: return null
+        val repository = CnbClientFactory.create(serverId).use { client -> client.getRepository(repositoryPath) }
+        if (repository.path != repositoryPath || !repository.cloneable || repository.cloneUrl.isBlank()) return null
+        return CnbOpenPullRequestTargetPushResolver.secureCloneUrl(repository.cloneUrl, repositoryPath, server.webUrl)
     }
 
     private val LOGGER = Logger.getLogger(CnbPushTriggerRecovery::class.java.name)
@@ -921,10 +1170,22 @@ internal class CnbRepositoryEventCause(
 private fun combineFailure(
     current: RuntimeException?,
     message: String,
-    failure: RuntimeException,
+    failure: Exception,
 ): RuntimeException {
     val wrapped = IllegalStateException(message, failure)
     if (current == null) return wrapped
     current.addSuppressed(wrapped)
     return current
+}
+
+internal fun Exception.propagateInterruption() {
+    var current: Throwable? = this
+    while (current != null) {
+        if (current is InterruptedException || current is InterruptedIOException) {
+            Thread.currentThread().interrupt()
+            throw this
+        }
+        current = current.cause
+    }
+    if (Thread.currentThread().isInterrupted) throw this
 }

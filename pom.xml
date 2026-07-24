@@ -73,6 +73,7 @@
     <kotlin.compiler.jvmTarget>17</kotlin.compiler.jvmTarget>
     <kotlin.compiler.javaParameters>true</kotlin.compiler.javaParameters>
     <kotlin.compiler.incremental>false</kotlin.compiler.incremental>
+    <kotlin.compiler.daemon>false</kotlin.compiler.daemon>
     <kapt.include.compile.classpath>false</kapt.include.compile.classpath>
 
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -454,6 +455,10 @@
             <goals>
               <goal>compile</goal>
             </goals>
+            <configuration>
+              <!-- Isolate Javac's module cleanup from classes produced by Kotlin and kapt. -->
+              <outputDirectory>${project.build.directory}/javac-classes</outputDirectory>
+            </configuration>
           </execution>
           <execution>
             <id>java-test-compile</id>
@@ -461,6 +466,45 @@
             <goals>
               <goal>testCompile</goal>
             </goals>
+            <configuration>
+              <outputDirectory>${project.build.directory}/javac-test-classes</outputDirectory>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <plugin>
+        <artifactId>maven-resources-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>merge-java-classes</id>
+            <phase>process-classes</phase>
+            <goals>
+              <goal>copy-resources</goal>
+            </goals>
+            <configuration>
+              <outputDirectory>${project.build.outputDirectory}</outputDirectory>
+              <resources>
+                <resource>
+                  <directory>${project.build.directory}/javac-classes</directory>
+                </resource>
+              </resources>
+            </configuration>
+          </execution>
+          <execution>
+            <id>merge-java-test-classes</id>
+            <phase>process-test-classes</phase>
+            <goals>
+              <goal>copy-resources</goal>
+            </goals>
+            <configuration>
+              <outputDirectory>${project.build.testOutputDirectory}</outputDirectory>
+              <resources>
+                <resource>
+                  <directory>${project.build.directory}/javac-test-classes</directory>
+                </resource>
+              </resources>
+            </configuration>
           </execution>
         </executions>
       </plugin>

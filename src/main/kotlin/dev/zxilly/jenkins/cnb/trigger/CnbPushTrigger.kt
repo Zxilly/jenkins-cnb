@@ -277,6 +277,14 @@ class CnbPushTrigger
             return target.isBuildable && (matches(delivery) || expandsOpenPullRequestsFor(delivery))
         }
 
+        /** Lifecycle observation is independent of whether deletion itself is a configured build event. */
+        internal fun observesRefLifecycle(delivery: CnbWebhookDelivery): Boolean {
+            val payload = delivery.payload
+            if (delivery.serverId != serverId || payload.repository.slug != repositoryPath) return false
+            if (CnbWebhookRefLifecycle.transition(delivery) == null) return false
+            return CnbRefGlob.matches(getRefFilter(), payload.ref.name)
+        }
+
         internal fun shouldCancelRunningBuildsFor(delivery: CnbWebhookDelivery): Boolean {
             if (!isCancelRunningBuildsOnUpdate()) return false
             val pullRequest = delivery.payload.pullRequest ?: return false
@@ -318,7 +326,7 @@ class CnbPushTrigger
                             target,
                             0,
                             CauseAction(CnbPushCause.from(delivery)),
-                            CnbQueueAction(queueIdentity),
+                            CnbQueueAction(queueIdentity, delivery.payload.deliveryId, CnbDeliveryScope.DIRECT),
                         ) != null
                 },
             )

@@ -41,11 +41,14 @@ internal object JenkinsCnbWebhookDispatcher : CnbWebhookDispatcher {
 
     private fun dispatchAsSystem(delivery: CnbWebhookDelivery) {
         val classicTriggers = ArrayList<CnbClassicTriggerCandidate>()
+        val lifecycleObservers = ArrayList<CnbClassicTriggerCandidate>()
         for (candidate in Jenkins.get().getAllItems(Job::class.java)) {
             try {
                 val trigger = ParameterizedJobMixIn.getTrigger(candidate, CnbPushTrigger::class.java)
-                if (trigger != null && trigger.isEligible(delivery)) {
-                    classicTriggers += CnbClassicTriggerCandidate(candidate, trigger)
+                if (trigger != null) {
+                    val classic = CnbClassicTriggerCandidate(candidate, trigger)
+                    if (trigger.isEligible(delivery)) classicTriggers += classic
+                    if (trigger.observesRefLifecycle(delivery)) lifecycleObservers += classic
                 }
             } catch (failure: RuntimeException) {
                 // One corrupt, legacy job must not turn every delivery for the repository into a
@@ -61,9 +64,25 @@ internal object JenkinsCnbWebhookDispatcher : CnbWebhookDispatcher {
 
         // Complete every network lookup before the first queue mutation. Classic policies share
         // one immutable API snapshot; each multibranch source uses its item-scoped credential.
-        val verified = ArrayList<CnbVerifiedQueueCandidate>()
+        var verified = ArrayList<CnbVerifiedQueueCandidate>()
         verified += CnbVerifiedWebhookPlanner.classic(delivery, classicTriggers)
         val targetPushPullRequests = CnbVerifiedWebhookPlanner.targetPushPullRequests(delivery)
+        val lifecycleTransition = CnbWebhookRefLifecycle.transition(delivery)
+        if (lifecycleTransition != null && lifecycleObservers.isNotEmpty()) {
+            val lifecycleVerified =
+                CnbWebhookRefLifecycle.candidateProvesTransition(delivery, lifecycleObservers, verified) ||
+                    lifecycleObservers.first().trigger.liveRevisionMatches(delivery)
+            if (lifecycleVerified) {
+                verified =
+                    ArrayList(
+                        CnbWebhookRefLifecycle.applyVerified(
+                            delivery,
+                            lifecycleObservers,
+                            verified,
+                        ),
+                    )
+            }
+        }
         if (delivery.payload.event == CnbWebhookEvent.PULL_REQUEST_COMMENT) {
             verified += CnbVerifiedWebhookPlanner.pullRequestComment(delivery)
         } else {

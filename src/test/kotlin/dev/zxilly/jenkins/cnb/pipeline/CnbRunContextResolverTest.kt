@@ -2,6 +2,8 @@ package dev.zxilly.jenkins.cnb.pipeline
 
 import dev.zxilly.jenkins.cnb.config.CnbGlobalConfiguration
 import dev.zxilly.jenkins.cnb.config.CnbServer
+import dev.zxilly.jenkins.cnb.scm.CnbBranchSCMHead
+import dev.zxilly.jenkins.cnb.scm.CnbSCMSource
 import dev.zxilly.jenkins.cnb.security.CnbRepositoryPath
 import hudson.AbortException
 import hudson.EnvVars
@@ -11,6 +13,11 @@ import hudson.model.ParametersDefinitionProperty
 import hudson.model.StringParameterDefinition
 import hudson.model.StringParameterValue
 import hudson.model.TaskListener
+import hudson.scm.NullSCM
+import jenkins.branch.Branch
+import jenkins.branch.BranchSource
+import org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition
+import org.jenkinsci.plugins.workflow.multibranch.WorkflowMultiBranchProject
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertThrows
@@ -128,4 +135,62 @@ class CnbRunContextResolverTest {
             }
         }
     }
+
+    @Test
+    fun `explicit server override never inherits credentials from a different SCM server`(jenkins: JenkinsRule) {
+        val serverA = localServer("server-a", 18_080)
+        val serverB = localServer("server-b", 18_081)
+        CnbGlobalConfiguration.get().setServers(listOf(serverA, serverB))
+        val project =
+            jenkins.jenkins.createProject(
+                WorkflowMultiBranchProject::class.java,
+                "credential-source-pairing",
+            )
+        val source =
+            CnbSCMSource("server-a", "team/project").also {
+                it.withId("server-a-source")
+                it.setApiCredentialsId("server-a-token")
+            }
+        project.sourcesList.add(BranchSource(source))
+        val branch = Branch(source.id, CnbBranchSCMHead("master"), NullSCM(), emptyList())
+        val job = project.projectFactory.newInstance(branch)
+        job.definition = CpsFlowDefinition("echo 'context'", true)
+        val run = jenkins.buildAndAssertSuccess(job)
+
+        val overridden =
+            CnbRunContextResolver.resolve(
+                run,
+                TaskListener.NULL,
+                CnbRunContextInput(serverId = "server-b", repository = "team/project"),
+            )
+        val sameServer =
+            CnbRunContextResolver.resolve(
+                run,
+                TaskListener.NULL,
+                CnbRunContextInput(serverId = "server-a", repository = "team/project"),
+            )
+        val explicit =
+            CnbRunContextResolver.resolve(
+                run,
+                TaskListener.NULL,
+                CnbRunContextInput(
+                    serverId = "server-b",
+                    repository = "team/project",
+                    credentialsId = "server-b-token",
+                ),
+            )
+
+        assertNull(overridden.credentialsId)
+        assertEquals("server-a-token", sameServer.credentialsId)
+        assertEquals("server-b-token", explicit.credentialsId)
+    }
+
+    private fun localServer(
+        id: String,
+        port: Int,
+    ): CnbServer =
+        CnbServer(id, id, "http://127.0.0.1:$port", "http://127.0.0.1:$port").also {
+            it.setAllowInsecureHttp(true)
+            it.setAllowPrivateNetwork(true)
+        }
 }

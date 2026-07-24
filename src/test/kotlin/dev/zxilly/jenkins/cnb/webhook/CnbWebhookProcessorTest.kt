@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.nio.charset.StandardCharsets
 import java.time.Clock
+import java.time.Duration
 import java.time.Instant
 import java.time.ZoneId
 import java.time.ZoneOffset
@@ -147,6 +148,23 @@ class CnbWebhookProcessorTest {
     }
 
     @Test
+    fun `completion persistence failure keeps a local completed fence and does not invite a retry`() {
+        val dispatched = mutableListOf<CnbWebhookDelivery>()
+        val replayStore = CompletionFailingReplayStore()
+        val processor = processor(dispatched, replayStore = replayStore)
+        val body = payload("team/victim", "delivery-completion-failure")
+        val signature = sign(body, VICTIM_SECRET)
+
+        val accepted = processor.process("cnb-cool", body, signature, "first")
+        val replay = processor.process("cnb-cool", body, signature, "retry")
+
+        assertFalse(accepted.duplicate)
+        assertTrue(replay.duplicate)
+        assertEquals(1, dispatched.size)
+        assertEquals(1, replayStore.localCompletions)
+    }
+
+    @Test
     fun `clears every resolved webhook secret after processing`() {
         val server = CnbServer("cnb-cool", "CNB", "https://cnb.cool", "https://api.cnb.cool")
         val current = VICTIM_SECRET.toCharArray()
@@ -169,6 +187,7 @@ class CnbWebhookProcessorTest {
     private fun processor(
         dispatched: MutableList<CnbWebhookDelivery>,
         clock: Clock = Clock.fixed(NOW, ZoneOffset.UTC),
+        replayStore: CnbWebhookReplayStore = CnbReplayCache(),
         dispatch: (CnbWebhookDelivery) -> Unit = dispatched::add,
     ): CnbWebhookProcessor {
         val server = CnbServer("cnb-cool", "CNB", "https://cnb.cool", "https://api.cnb.cool")
@@ -180,8 +199,41 @@ class CnbWebhookProcessorTest {
                     listOf((keys[repositoryPath] ?: throw NoSuchElementException()).toCharArray())
                 },
             dispatcher = CnbWebhookDispatcher(dispatch),
+            replayCache = replayStore,
             clock = clock,
         )
+    }
+
+    private class CompletionFailingReplayStore : CnbWebhookReplayStore {
+        private val delegate = CnbReplayCache()
+        var localCompletions = 0
+            private set
+
+        override fun claim(
+            scope: String,
+            key: String,
+            now: Instant,
+            leaseTtl: Duration,
+        ): CnbReplayClaimResult = delegate.claim(scope, key, now, leaseTtl)
+
+        override fun complete(
+            token: CnbReplayClaimToken,
+            now: Instant,
+            ttl: Duration,
+        ): Unit = throw java.io.IOException("injected completion failure")
+
+        override fun completeLocally(
+            token: CnbReplayClaimToken,
+            now: Instant,
+            ttl: Duration,
+        ) {
+            localCompletions++
+            delegate.completeLocally(token, now, ttl)
+        }
+
+        override fun release(token: CnbReplayClaimToken) = delegate.release(token)
+
+        override fun abandon(token: CnbReplayClaimToken) = delegate.abandon(token)
     }
 
     private class MutableClock(
