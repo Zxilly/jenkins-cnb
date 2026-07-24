@@ -168,12 +168,16 @@ internal object CnbBuildMetadataResolver {
                 tag.length <= 1024 && Repository.isValidRefName("refs/tags/$tag")
             }
 
+    @Suppress("DEPRECATION")
     private fun revisionMetadata(actionable: Actionable): Metadata {
-        val revision =
-            actionable.actions
-                .filterIsInstance<SCMRevisionAction>()
-                .firstOrNull()
-                ?.revision ?: return Metadata()
+        var revision: SCMRevision? = null
+        for (action in actionable.actions) {
+            if (action is SCMRevisionAction) {
+                revision = action.revision
+                break
+            }
+        }
+        revision ?: return Metadata()
         return when (revision) {
             is CnbPullRequestSCMRevision -> {
                 Metadata(
