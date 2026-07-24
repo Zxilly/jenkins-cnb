@@ -439,6 +439,10 @@
 
       <plugin>
         <artifactId>maven-compiler-plugin</artifactId>
+        <configuration>
+          <!-- Kotlin compiles first; javac must not clear class files produced by another compiler. -->
+          <useIncrementalCompilation>false</useIncrementalCompilation>
+        </configuration>
         <executions>
           <execution>
             <id>default-compile</id>
