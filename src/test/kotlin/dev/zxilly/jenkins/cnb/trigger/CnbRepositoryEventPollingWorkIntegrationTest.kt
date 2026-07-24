@@ -10,6 +10,8 @@ import dev.zxilly.jenkins.cnb.config.CnbServer
 import dev.zxilly.jenkins.cnb.health.CnbHealthComponent
 import dev.zxilly.jenkins.cnb.health.CnbOperationalHealth
 import dev.zxilly.jenkins.cnb.scm.CnbSCMSource
+import hudson.model.Action
+import hudson.model.Queue
 import hudson.model.TaskListener
 import hudson.util.StreamTaskListener
 import jenkins.branch.BranchSource
@@ -34,6 +36,38 @@ import java.util.concurrent.atomic.AtomicInteger
 
 @WithJenkins
 class CnbRepositoryEventPollingWorkIntegrationTest {
+    @Test
+    fun `queue refusal leaves a recovered event available for retry`(jenkins: JenkinsRule) {
+        val api = startApi { exchange -> respond(exchange, 200, pushEvents("team/project", "retry-event")) }
+        val veto =
+            object : Queue.QueueDecisionHandler() {
+                override fun shouldSchedule(
+                    task: Queue.Task,
+                    actions: MutableList<Action>,
+                ): Boolean = false
+            }
+        try {
+            configureServer(api)
+            val project = jenkins.createFreeStyleProject("classic-retry")
+            project.addTrigger(CnbPushTrigger("primary", "team/project", "main"))
+            Queue.QueueDecisionHandler.all().add(veto)
+
+            CnbRepositoryEventPollingWork(CnbOperationalHealth()).runOnce(TaskListener.NULL)
+            jenkins.waitUntilNoActivity()
+            assertNull(project.lastBuild)
+
+            Queue.QueueDecisionHandler.all().remove(veto)
+            CnbRepositoryEventPollingWork(CnbOperationalHealth()).runOnce(TaskListener.NULL)
+            jenkins.waitUntilNoActivity()
+
+            val build = requireNotNull(project.lastBuild)
+            assertEquals("retry-event", requireNotNull(build.getCause(CnbRepositoryEventCause::class.java)).eventId)
+        } finally {
+            Queue.QueueDecisionHandler.all().remove(veto)
+            api.stop(0)
+        }
+    }
+
     @Test
     fun `production polling recovers a classic job and persists cursor and dedup state`(jenkins: JenkinsRule) {
         val requests = CopyOnWriteArrayList<String>()

@@ -839,10 +839,7 @@ internal object CnbPushTriggerRecovery {
             if (!matches) continue
             try {
                 val identity = CnbQueueIdentity(serverId, repositoryPath, qualifiedRef, push.commit.lowercase(Locale.ROOT))
-                if (trigger.isCancelPendingBuildsOnUpdate()) {
-                    val task = candidate as? Queue.Task ?: continue
-                    CnbPendingBuilds.cancelSuperseded(Queue.getInstance(), task, identity)
-                }
+                val queueTask = if (trigger.isCancelPendingBuildsOnUpdate()) candidate as? Queue.Task ?: continue else null
                 ParameterizedJobMixIn.scheduleBuild2(
                     candidate,
                     0,
@@ -857,7 +854,10 @@ internal object CnbPushTriggerRecovery {
                         ),
                     ),
                     CnbQueueAction(identity),
-                )
+                ) ?: throw IllegalStateException("Jenkins refused the recovered CNB event build")
+                if (queueTask != null) {
+                    CnbPendingBuilds.cancelSuperseded(Queue.getInstance(), queueTask, identity)
+                }
             } catch (failure: RuntimeException) {
                 schedulingFailure =
                     combineFailure(

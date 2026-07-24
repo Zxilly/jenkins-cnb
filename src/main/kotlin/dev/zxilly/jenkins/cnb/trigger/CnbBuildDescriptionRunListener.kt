@@ -1,6 +1,7 @@
 package dev.zxilly.jenkins.cnb.trigger
 
 import hudson.Extension
+import hudson.Util
 import hudson.model.Run
 import hudson.model.TaskListener
 import hudson.model.listeners.RunListener
@@ -25,7 +26,7 @@ class CnbBuildDescriptionRunListener : RunListener<Run<*, *>>() {
         val cause = run.getCause(CnbPushCause::class.java) ?: return
         val description = cause.shortDescription.takeIf(String::isNotBlank) ?: return
         try {
-            run.description = description
+            run.description = Util.escape(description)
         } catch (_: IOException) {
             listener.logger.println("Failed to set the CNB build description")
         }

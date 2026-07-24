@@ -44,6 +44,21 @@ class CnbBuildDescriptionRunListenerTest {
     }
 
     @Test
+    fun `escapes webhook fields before storing a Jenkins build description`(jenkins: JenkinsRule) {
+        val project = jenkins.createFreeStyleProject("descriptions-hostile")
+        project.addTrigger(CnbPushTrigger("primary", "team/project", "**"))
+        val hostile = delivery(ref = "main<img src=x onerror='alert(1)'>", actor = "alice & <admin>")
+
+        val build = jenkins.assertBuildStatusSuccess(project.scheduleBuild2(0, CnbPushCause.from(hostile)))
+
+        val description = requireNotNull(build.description)
+        assertEquals(
+            "CNB push event for team/project at main&lt;img src=x onerror=&#039;alert(1)&#039;&gt; by alice &amp; &lt;admin&gt;",
+            description,
+        )
+    }
+
+    @Test
     fun `never overwrites an existing build description`(jenkins: JenkinsRule) {
         val project = jenkins.createFreeStyleProject("descriptions-existing")
         project.addTrigger(CnbPushTrigger("primary", "team/project", "**"))
@@ -56,7 +71,10 @@ class CnbBuildDescriptionRunListenerTest {
         assertEquals(1, build.getActions(CauseAction::class.java).size)
     }
 
-    private fun delivery(): CnbWebhookDelivery =
+    private fun delivery(
+        ref: String = "main",
+        actor: String = "alice",
+    ): CnbWebhookDelivery =
         CnbWebhookDelivery(
             "primary",
             CnbWebhookPayload(
@@ -68,8 +86,8 @@ class CnbBuildDescriptionRunListenerTest {
                 retry = false,
                 instance = CnbWebhookInstance("https://cnb.cool", "https://api.cnb.cool"),
                 repository = CnbWebhookRepository("repo-1", "team/project", "https://cnb.cool/team/project"),
-                actor = CnbWebhookActor("user-1", "alice", "Alice", ""),
-                ref = CnbWebhookRef("main", SHA, "b".repeat(40), SHA, false),
+                actor = CnbWebhookActor("user-1", actor, "Alice", ""),
+                ref = CnbWebhookRef(ref, SHA, "b".repeat(40), SHA, false),
                 pullRequest = null,
             ),
             "test",
