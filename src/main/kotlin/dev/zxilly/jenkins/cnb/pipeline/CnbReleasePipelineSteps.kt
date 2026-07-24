@@ -685,7 +685,7 @@ private class CnbReleaseTransferStepExecution(
             }
 
             else -> {
-                Unit
+                return
             }
         }
     }
