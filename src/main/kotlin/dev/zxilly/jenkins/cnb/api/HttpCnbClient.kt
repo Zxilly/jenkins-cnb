@@ -680,14 +680,25 @@ internal class HttpCnbClient(
         label: String,
     ): CnbLabel {
         validatePullLabels(listOf(label))
-        val wire =
-            requestJson(
-                "DELETE",
-                "/${encodeRepository(repo)}/-/pulls/${encodePullRequestNumber(number)}/labels/${encodeSegment(label)}",
-                CnbLabelWire.serializer(),
-                idempotent = true,
-            ) ?: throw CnbApiException("CNB remove pull request label response was empty")
-        return parseLabel(wire)
+        val cachedLabel = listPullLabels(repo, number).firstOrNull { it.name == label }
+        return requestValue(
+            method = "DELETE",
+            path = "/${encodeRepository(repo)}/-/pulls/${encodePullRequestNumber(number)}/labels/${encodeSegment(label)}",
+            query = emptyMap(),
+            body = null,
+            idempotent = true,
+            acceptNotFound = false,
+            acceptNotFoundAfterRetryableFailure = cachedLabel != null,
+            notFoundAfterRetryValue = cachedLabel,
+        ) { response ->
+            if (
+                response.statusCode == 204 || response.statusCode == 205 ||
+                response.headers.allValues("Content-Length") == listOf("0")
+            ) {
+                throw CnbApiException("CNB remove pull request label response was empty")
+            }
+            parseLabel(response.readJson<CnbLabelWire>(typeInfo<CnbLabelWire>()))
+        } ?: throw CnbApiException("CNB remove pull request label response was empty")
     }
 
     override fun clearPullLabels(
@@ -1849,7 +1860,17 @@ internal class HttpCnbClient(
         idempotent: Boolean = method == "GET",
         acceptNotFound: Boolean = false,
     ) {
-        requestBytes(method, path, query, body, idempotent, acceptNotFound)
+        requestValue(
+            method = method,
+            path = path,
+            query = query,
+            body = body,
+            idempotent = idempotent,
+            acceptNotFound = acceptNotFound,
+            acceptNotFoundAfterRetryableFailure = method == "DELETE" && idempotent,
+        ) { response ->
+            response.readBoundedBytes(MAX_API_RESPONSE_BYTES)
+        }
     }
 
     private fun <T> encodeRequest(
@@ -1876,6 +1897,8 @@ internal class HttpCnbClient(
         body: CnbEncodedJsonBody?,
         idempotent: Boolean,
         acceptNotFound: Boolean,
+        acceptNotFoundAfterRetryableFailure: Boolean = false,
+        notFoundAfterRetryValue: T? = null,
         successReader: CnbHttpResponseReader<T>,
     ): T? {
         try {
@@ -1883,6 +1906,7 @@ internal class HttpCnbClient(
             circuit.beforeRequest()
             val uri = buildUri(path, query)
             var lastFailure: Throwable? = null
+            var retryableFailureSeen = false
             val attempts = if (idempotent) MAX_ATTEMPTS else 1
             for (attempt in 1..attempts) {
                 try {
@@ -1894,9 +1918,13 @@ internal class HttpCnbClient(
                                 ApiResponseBody.Error(context.readBoundedBytes(MAX_ERROR_RESPONSE_BYTES))
                             }
                         }
-                    if (response.statusCode == 404 && acceptNotFound) {
+                    if (
+                        response.statusCode == 404 &&
+                        (acceptNotFound ||
+                            (method == "DELETE" && acceptNotFoundAfterRetryableFailure && retryableFailureSeen))
+                    ) {
                         circuit.success()
-                        return null
+                        return if (retryableFailureSeen) notFoundAfterRetryValue else null
                     }
                     if (response.statusCode in 200..299) {
                         circuit.success()
@@ -1914,6 +1942,7 @@ internal class HttpCnbClient(
                         circuit.failure()
                         throw error
                     }
+                    retryableFailureSeen = true
                     lastFailure = error
                     sleepBeforeRetry(attempt, response.headers.firstValue("Retry-After"))
                 } catch (e: InterruptedException) {
@@ -1927,6 +1956,7 @@ internal class HttpCnbClient(
                         circuit.failure()
                         throw CnbApiException("CNB request failed: ${safeMessage(e)}", retryable = true, cause = e)
                     }
+                    retryableFailureSeen = true
                     sleepBeforeRetry(attempt, null)
                 }
             }
