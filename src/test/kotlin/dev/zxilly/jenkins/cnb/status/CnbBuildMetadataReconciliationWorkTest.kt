@@ -245,6 +245,158 @@ class CnbBuildMetadataReconciliationWorkTest {
         }
     }
 
+    @Test
+    fun `queue index retains an item when a later metadata context is pending`(jenkins: JenkinsRule) {
+        val project = jenkins.createFreeStyleProject("metadata-queue-contexts")
+
+        @Suppress("DEPRECATION")
+        val item = requireNotNull(Queue.getInstance().schedule(project, 3_600, emptyList()))
+        val reported = pendingAction("queue-reported")
+        val pending = pendingAction("queue-pending")
+        val reportedSnapshot = requireNotNull(reported.snapshot())
+        reported.markReported(reportedSnapshot.version, null)
+        item.addAction(reported)
+        item.addAction(pending)
+        val index = CnbBuildMetadataQueueRecoveryIndex()
+
+        try {
+            index.observe(item)
+
+            assertEquals(1, index.size())
+            assertEquals(listOf(item.id), index.snapshotIterator().asSequence().map(Queue.Item::getId).toList())
+
+            val requests = CnbBuildMetadataRecoveryGate(startupRecovery = false)
+            val scheduled = mutableListOf<CnbBuildMetadataAction>()
+            requests.request()
+            val stats =
+                CnbBuildMetadataReconciliationWork().recoverOnce(
+                    recoveryRequests = requests,
+                    queueItems = index::snapshotIterator,
+                    jobs = { emptyList<Job<*, *>>().iterator() },
+                    scheduleQueue = { _, action ->
+                        scheduled += action
+                        true
+                    },
+                    scheduleRun = { _, _ -> error("runs must be empty") },
+                )
+
+            assertEquals(listOf(pending), scheduled)
+            assertEquals(1, stats.queueItemsInspected)
+            assertEquals(1, stats.accepted)
+        } finally {
+            index.remove(item)
+            Queue.getInstance().cancel(item)
+        }
+    }
+
+    @Test
+    fun `run recovery schedules a later pending metadata context`(jenkins: JenkinsRule) {
+        val project = jenkins.createFreeStyleProject("metadata-run-contexts")
+        val run = jenkins.buildAndAssertSuccess(project)
+        val reported = pendingAction("run-reported")
+        val pending = pendingAction("run-pending")
+        val reportedSnapshot = requireNotNull(reported.snapshot())
+        reported.markReported(reportedSnapshot.version, null)
+        run.addAction(reported)
+        run.addAction(pending)
+        val requests = CnbBuildMetadataRecoveryGate(startupRecovery = false)
+        val scheduled = mutableListOf<CnbBuildMetadataAction>()
+        requests.request()
+
+        val stats =
+            CnbBuildMetadataReconciliationWork().recoverOnce(
+                recoveryRequests = requests,
+                queueItems = { emptyList<Queue.Item>().iterator() },
+                jobs = { listOf<Job<*, *>>(project).iterator() },
+                scheduleQueue = { _, _ -> error("queue must be empty") },
+                scheduleRun = { scheduledRun, action ->
+                    assertEquals(run, scheduledRun)
+                    scheduled += action
+                    true
+                },
+            )
+
+        assertEquals(listOf(pending), scheduled)
+        assertEquals(1, stats.runsInspected)
+        assertEquals(1, stats.accepted)
+    }
+
+    @Test
+    fun `queue action budget resumes remaining contexts on later ticks`(jenkins: JenkinsRule) {
+        val project = jenkins.createFreeStyleProject("metadata-queue-budget")
+
+        @Suppress("DEPRECATION")
+        val item = requireNotNull(Queue.getInstance().schedule(project, 3_600, emptyList()))
+        val actions = (1..3).map { pendingAction("queue-budget-$it") }
+        actions.forEach(item::addAction)
+        val requests = CnbBuildMetadataRecoveryGate(startupRecovery = false)
+        val work = CnbBuildMetadataReconciliationWork()
+        val scheduled = mutableListOf<CnbBuildMetadataAction>()
+        requests.request()
+
+        try {
+            var ticks = 0
+            while (requests.pendingGeneration() != null && ticks < 10) {
+                val stats =
+                    work.recoverOnce(
+                        recoveryRequests = requests,
+                        queueItems = { listOf<Queue.Item>(item).iterator() },
+                        jobs = { emptyList<Job<*, *>>().iterator() },
+                        maximumQueueItems = 1,
+                        maximumActions = 1,
+                        scheduleQueue = { _, action ->
+                            scheduled += action
+                            true
+                        },
+                        scheduleRun = { _, _ -> error("runs must be empty") },
+                    )
+                assertTrue(stats.actionsInspected <= 1)
+                ticks++
+            }
+
+            assertNull(requests.pendingGeneration())
+            assertEquals(actions, scheduled)
+        } finally {
+            Queue.getInstance().cancel(item)
+        }
+    }
+
+    @Test
+    fun `run action budget resumes remaining contexts on later ticks`(jenkins: JenkinsRule) {
+        val project = jenkins.createFreeStyleProject("metadata-run-budget")
+        val run = jenkins.buildAndAssertSuccess(project)
+        val actions = (1..3).map { pendingAction("run-budget-$it") }
+        actions.forEach(run::addAction)
+        val requests = CnbBuildMetadataRecoveryGate(startupRecovery = false)
+        val work = CnbBuildMetadataReconciliationWork()
+        val scheduled = mutableListOf<CnbBuildMetadataAction>()
+        requests.request()
+
+        var ticks = 0
+        while (requests.pendingGeneration() != null && ticks < 10) {
+            val stats =
+                work.recoverOnce(
+                    recoveryRequests = requests,
+                    queueItems = { emptyList<Queue.Item>().iterator() },
+                    jobs = { listOf<Job<*, *>>(project).iterator() },
+                    maximumJobs = 1,
+                    maximumRuns = 1,
+                    maximumActions = 1,
+                    scheduleQueue = { _, _ -> error("queue must be empty") },
+                    scheduleRun = { scheduledRun, action ->
+                        assertEquals(run, scheduledRun)
+                        scheduled += action
+                        true
+                    },
+                )
+            assertTrue(stats.actionsInspected <= 1)
+            ticks++
+        }
+
+        assertNull(requests.pendingGeneration())
+        assertEquals(actions, scheduled)
+    }
+
     private fun pendingAction(identity: String): CnbBuildMetadataAction {
         val action = CnbBuildMetadataAction("run:metadata-history#$identity")
         action.advance(

@@ -25,6 +25,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 class CnbBuildMetadataDispatcherTest {
     @Test
@@ -126,6 +127,125 @@ class CnbBuildMetadataDispatcherTest {
         assertFalse(action.isPending())
         assertEquals(2, reports.get())
         runtime.shutdown()
+    }
+
+    @Test
+    fun `retryable API exhaustion remains pending for low frequency reconciliation`() {
+        val action = pendingAction("api-outage")
+        val clock = FakeClock()
+        val wakeups = RecordingWakeups(clock)
+        val workers = SwitchableExecutor()
+        val recoveryRequests = CnbBuildMetadataRecoveryGate(startupRecovery = false)
+        var apiAvailable = false
+        val reports = AtomicInteger()
+        val runtime =
+            CnbBuildMetadataDispatchRuntime(
+                workers = workers,
+                wakeups = wakeups,
+                reporter =
+                    CnbMetadataReporter { _, _ ->
+                        reports.incrementAndGet()
+                        if (!apiAvailable) throw CnbApiException("temporary outage", retryable = true)
+                        CnbBuildMetadataReportResult("comment-after-outage")
+                    },
+                clockMillis = clock::now,
+                recoveryRequests = recoveryRequests,
+            )
+
+        assertTrue(runtime.scheduleItem(null, action))
+        workers.runNext()
+        while (wakeups.activeCount() > 0) {
+            clock.advance(wakeups.singleActive().delayMillis)
+            wakeups.runDue()
+            workers.runNext()
+        }
+
+        assertEquals(8, reports.get())
+        assertTrue(action.isPending())
+        assertNull(runtime.retryAttempt(action))
+        assertEquals(0, runtime.pendingCount())
+        assertNotNull(recoveryRequests.pendingGeneration())
+
+        apiAvailable = true
+        assertTrue(runtime.scheduleItem(null, action))
+        workers.runNext()
+
+        assertEquals(9, reports.get())
+        assertFalse(action.isPending())
+        runtime.shutdown()
+    }
+
+    @Test
+    fun `retry exhaustion requests recovery only after the active key is removed`() {
+        val action = pendingAction("api-outage-race")
+        val clock = FakeClock()
+        val wakeups = RecordingWakeups(clock)
+        val workers = SwitchableExecutor()
+        val recoveryRequests = CnbBuildMetadataRecoveryGate(startupRecovery = false)
+        val recoveryRequested = CountDownLatch(1)
+        val releaseRecoveryRequest = CountDownLatch(1)
+        val threadFailure = AtomicReference<Throwable?>()
+        var apiAvailable = false
+        val runtime =
+            CnbBuildMetadataDispatchRuntime(
+                workers = workers,
+                wakeups = wakeups,
+                reporter =
+                    CnbMetadataReporter { _, _ ->
+                        if (!apiAvailable) throw CnbApiException("temporary outage", retryable = true)
+                        CnbBuildMetadataReportResult("comment-after-race")
+                    },
+                clockMillis = clock::now,
+                recoveryRequests = recoveryRequests,
+                requestRecovery = {
+                    recoveryRequests.request()
+                    recoveryRequested.countDown()
+                    check(releaseRecoveryRequest.await(5, TimeUnit.SECONDS))
+                },
+            )
+        var finalAttempt: Thread? = null
+
+        try {
+            assertTrue(runtime.scheduleItem(null, action))
+            workers.runNext()
+            repeat(6) {
+                clock.advance(wakeups.singleActive().delayMillis)
+                wakeups.runDue()
+                workers.runNext()
+            }
+            clock.advance(wakeups.singleActive().delayMillis)
+            wakeups.runDue()
+
+            val exhaustionThread =
+                Thread {
+                    try {
+                        workers.runNext()
+                    } catch (failure: Throwable) {
+                        threadFailure.set(failure)
+                    }
+                }.apply { start() }
+            finalAttempt = exhaustionThread
+            assertTrue(recoveryRequested.await(5, TimeUnit.SECONDS))
+
+            val generation = requireNotNull(recoveryRequests.pendingGeneration())
+            assertTrue(runtime.scheduleItem(null, action), "simulated scanner accepts the durable Action")
+            assertTrue(recoveryRequests.completeIfUnchanged(generation))
+            releaseRecoveryRequest.countDown()
+            exhaustionThread.join(5_000)
+
+            assertFalse(exhaustionThread.isAlive)
+            assertNull(threadFailure.get())
+            assertNull(recoveryRequests.pendingGeneration())
+            assertEquals(1, runtime.pendingCount() + runtime.activeCount())
+
+            apiAvailable = true
+            workers.runNext()
+            assertFalse(action.isPending())
+        } finally {
+            releaseRecoveryRequest.countDown()
+            finalAttempt?.join(5_000)
+            runtime.shutdown()
+        }
     }
 
     @Test

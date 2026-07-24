@@ -25,9 +25,13 @@ import java.util.logging.Logger
 class CnbBuildMetadataReconciliationWork : AsyncPeriodicWork("CNB build metadata reconciliation") {
     private var roundGeneration: Long? = null
     private var queueIterator: Iterator<Queue.Item>? = null
+    private var currentQueueItem: Queue.Item? = null
+    private var currentQueueActions: Iterator<CnbBuildMetadataAction>? = null
     private var queueComplete = true
     private var jobIterator: Iterator<Job<*, *>>? = null
     private var currentRun: Run<*, *>? = null
+    private var currentRunActionOwner: Run<*, *>? = null
+    private var currentRunActions: Iterator<CnbBuildMetadataAction>? = null
     private var jobsComplete = true
 
     override fun getRecurrencePeriod(): Long = RECURRENCE.toMillis()
@@ -68,12 +72,14 @@ class CnbBuildMetadataReconciliationWork : AsyncPeriodicWork("CNB build metadata
         maximumQueueItems: Int = MAX_QUEUE_ITEMS_PER_EXECUTION,
         maximumJobs: Int = MAX_JOBS_PER_EXECUTION,
         maximumRuns: Int = MAX_RUNS_PER_EXECUTION,
+        maximumActions: Int = MAX_ACTIONS_PER_EXECUTION,
         scheduleQueue: (Queue.Item, CnbBuildMetadataAction) -> Boolean,
         scheduleRun: (Run<*, *>, CnbBuildMetadataAction) -> Boolean,
     ): RecoveryTickStats {
         require(maximumQueueItems > 0) { "maximumQueueItems must be positive" }
         require(maximumJobs > 0) { "maximumJobs must be positive" }
         require(maximumRuns > 0) { "maximumRuns must be positive" }
+        require(maximumActions > 0) { "maximumActions must be positive" }
 
         val generation = roundGeneration ?: recoveryRequests.pendingGeneration() ?: return RecoveryTickStats.idle()
         return try {
@@ -82,11 +88,17 @@ class CnbBuildMetadataReconciliationWork : AsyncPeriodicWork("CNB build metadata
             }
             val queueStats =
                 if (queueComplete) {
-                    ReconciliationStats(0, 0)
+                    ReconciliationStats(0, 0, 0)
                 } else {
-                    reconcileQueue(maximumQueueItems, scheduleQueue)
+                    reconcileQueue(maximumQueueItems, maximumActions, scheduleQueue)
                 }
-            val runStats = reconcileRuns(maximumJobs, maximumRuns, scheduleRun)
+            val remainingActions = maximumActions - queueStats.actionsInspected
+            val runStats =
+                if (remainingActions == 0) {
+                    RunReconciliationStats(0, 0, 0, 0)
+                } else {
+                    reconcileRuns(maximumJobs, maximumRuns, remainingActions, scheduleRun)
+                }
             val completed = queueComplete && jobsComplete
             val requestCleared = completed && recoveryRequests.completeIfUnchanged(generation)
             if (completed) resetRound()
@@ -95,6 +107,7 @@ class CnbBuildMetadataReconciliationWork : AsyncPeriodicWork("CNB build metadata
                 queueItemsInspected = queueStats.inspected,
                 jobsInspected = runStats.jobsInspected,
                 runsInspected = runStats.runsInspected,
+                actionsInspected = queueStats.actionsInspected + runStats.actionsInspected,
                 accepted = queueStats.accepted + runStats.accepted,
                 roundCompleted = completed,
                 requestCleared = requestCleared,
@@ -120,44 +133,80 @@ class CnbBuildMetadataReconciliationWork : AsyncPeriodicWork("CNB build metadata
     ) {
         roundGeneration = generation
         queueIterator = queueItems
+        currentQueueItem = null
+        currentQueueActions = null
         queueComplete = !queueItems.hasNext()
         if (queueComplete) queueIterator = null
         jobIterator = jobs
         currentRun = null
+        currentRunActionOwner = null
+        currentRunActions = null
         jobsComplete = false
     }
 
     private fun reconcileQueue(
         maximumItems: Int,
+        maximumActions: Int,
         schedule: (Queue.Item, CnbBuildMetadataAction) -> Boolean,
     ): ReconciliationStats {
-        val iterator = queueIterator ?: return ReconciliationStats(0, 0)
+        val iterator = queueIterator ?: return ReconciliationStats(0, 0, 0)
         var inspected = 0
+        var actionsInspected = 0
         var accepted = 0
-        while (inspected < maximumItems && iterator.hasNext()) {
-            val item = iterator.next()
-            inspected++
-            val action = item.getAction(CnbBuildMetadataAction::class.java) ?: continue
-            if (!action.isPending()) continue
-            if (schedule(item, action)) accepted++
+        while (actionsInspected < maximumActions) {
+            var item = currentQueueItem
+            var actions = currentQueueActions
+            if (item == null || actions == null || !actions.hasNext()) {
+                currentQueueItem = null
+                currentQueueActions = null
+                if (inspected >= maximumItems || !iterator.hasNext()) break
+                item = iterator.next()
+                actions = item.getActions(CnbBuildMetadataAction::class.java).iterator()
+                currentQueueItem = item
+                currentQueueActions = actions
+                inspected++
+                if (!actions.hasNext()) continue
+            }
+
+            val action = actions.next()
+            actionsInspected++
+            if (action.isPending() && schedule(item, action)) accepted++
         }
-        if (!iterator.hasNext()) {
+        if (currentQueueActions?.hasNext() != true) {
+            currentQueueItem = null
+            currentQueueActions = null
+        }
+        if (currentQueueActions == null && !iterator.hasNext()) {
             queueComplete = true
             queueIterator = null
         }
-        return ReconciliationStats(inspected, accepted)
+        return ReconciliationStats(inspected, actionsInspected, accepted)
     }
 
     private fun reconcileRuns(
         maximumJobs: Int,
         maximumRuns: Int,
+        maximumActions: Int,
         schedule: (Run<*, *>, CnbBuildMetadataAction) -> Boolean,
     ): RunReconciliationStats {
-        if (jobsComplete) return RunReconciliationStats(0, 0, 0)
-        var jobsInspected = if (currentRun == null) 0 else 1
+        if (jobsComplete) return RunReconciliationStats(0, 0, 0, 0)
+        var jobsInspected = if (currentRun == null && currentRunActionOwner == null) 0 else 1
         var runsInspected = 0
+        var actionsInspected = 0
         var accepted = 0
-        while (runsInspected < maximumRuns) {
+        while (actionsInspected < maximumActions) {
+            val actionOwner = currentRunActionOwner
+            val actions = currentRunActions
+            if (actionOwner != null && actions != null && actions.hasNext()) {
+                val action = actions.next()
+                actionsInspected++
+                if (action.isPending() && schedule(actionOwner, action)) accepted++
+                continue
+            }
+            currentRunActionOwner = null
+            currentRunActions = null
+            if (runsInspected >= maximumRuns) break
+
             var run = currentRun
             if (run == null) {
                 if (jobsInspected >= maximumJobs) break
@@ -174,30 +223,39 @@ class CnbBuildMetadataReconciliationWork : AsyncPeriodicWork("CNB build metadata
 
             currentRun = run.previousBuild
             runsInspected++
-            val action = run.getAction(CnbBuildMetadataAction::class.java) ?: continue
-            if (!action.isPending()) continue
-            if (schedule(run, action)) accepted++
+            currentRunActionOwner = run
+            currentRunActions = run.getActions(CnbBuildMetadataAction::class.java).iterator()
         }
-        return RunReconciliationStats(jobsInspected, runsInspected, accepted)
+        if (currentRunActions?.hasNext() != true) {
+            currentRunActionOwner = null
+            currentRunActions = null
+        }
+        return RunReconciliationStats(jobsInspected, runsInspected, actionsInspected, accepted)
     }
 
     private fun resetRound() {
         roundGeneration = null
         queueIterator = null
+        currentQueueItem = null
+        currentQueueActions = null
         queueComplete = true
         jobIterator = null
         currentRun = null
+        currentRunActionOwner = null
+        currentRunActions = null
         jobsComplete = true
     }
 
     private data class ReconciliationStats(
         val inspected: Int,
+        val actionsInspected: Int,
         val accepted: Int,
     )
 
     private data class RunReconciliationStats(
         val jobsInspected: Int,
         val runsInspected: Int,
+        val actionsInspected: Int,
         val accepted: Int,
     )
 
@@ -206,6 +264,7 @@ class CnbBuildMetadataReconciliationWork : AsyncPeriodicWork("CNB build metadata
         val queueItemsInspected: Int = 0,
         val jobsInspected: Int = 0,
         val runsInspected: Int = 0,
+        val actionsInspected: Int = 0,
         val accepted: Int = 0,
         val roundCompleted: Boolean = false,
         val requestCleared: Boolean = false,
@@ -220,6 +279,7 @@ class CnbBuildMetadataReconciliationWork : AsyncPeriodicWork("CNB build metadata
         private const val MAX_QUEUE_ITEMS_PER_EXECUTION = 512
         private const val MAX_JOBS_PER_EXECUTION = 256
         private const val MAX_RUNS_PER_EXECUTION = 1024
+        private const val MAX_ACTIONS_PER_EXECUTION = 1024
         private val LOGGER = Logger.getLogger(CnbBuildMetadataReconciliationWork::class.java.name)
     }
 }
@@ -260,8 +320,7 @@ internal class CnbBuildMetadataQueueRecoveryIndex {
     private val items = ConcurrentSkipListMap<Long, WeakReference<Queue.Item>>()
 
     fun observe(item: Queue.Item) {
-        val action = item.getAction(CnbBuildMetadataAction::class.java)
-        if (action?.isPending() == true) {
+        if (item.hasPendingMetadata()) {
             items[item.id] = WeakReference(item)
         } else {
             items.remove(item.id)
@@ -303,7 +362,7 @@ internal class CnbBuildMetadataQueueRecoveryIndex {
                     cursor = entry.key
                     cursorInitialized = true
                     val item = entry.value.get()
-                    val pending = item?.getAction(CnbBuildMetadataAction::class.java)?.isPending() == true
+                    val pending = item?.hasPendingMetadata() == true
                     if (item == null || !pending) {
                         items.remove(entry.key, entry.value)
                         continue
@@ -316,6 +375,9 @@ internal class CnbBuildMetadataQueueRecoveryIndex {
     }
 
     internal fun size(): Int = items.size
+
+    private fun Queue.Item.hasPendingMetadata(): Boolean =
+        getActions(CnbBuildMetadataAction::class.java).any(CnbBuildMetadataAction::isPending)
 }
 
 internal val CNB_BUILD_METADATA_QUEUE_RECOVERY_INDEX = CnbBuildMetadataQueueRecoveryIndex()

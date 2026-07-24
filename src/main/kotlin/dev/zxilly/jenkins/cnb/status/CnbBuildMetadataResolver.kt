@@ -8,7 +8,6 @@ import dev.zxilly.jenkins.cnb.security.CnbRepositoryPath
 import hudson.model.Actionable
 import hudson.model.Cause
 import hudson.model.Item
-import hudson.model.Run
 import jenkins.plugins.git.AbstractGitSCMSource
 import jenkins.scm.api.SCMRevision
 import jenkins.scm.api.SCMRevisionAction
@@ -37,7 +36,7 @@ internal object CnbBuildMetadataResolver {
         previous: CnbBuildMetadataTarget?,
         defaultContext: String? = null,
     ): CnbBuildMetadataResolution {
-        val revision = (actionable as? Run<*, *>)?.let(::revisionMetadata) ?: Metadata()
+        val revision = revisionMetadata(actionable)
         val source = sourceMetadata(item)
         val cause = causeMetadata(causes)
 
@@ -169,8 +168,8 @@ internal object CnbBuildMetadataResolver {
                 tag.length <= 1024 && Repository.isValidRefName("refs/tags/$tag")
             }
 
-    private fun revisionMetadata(run: Run<*, *>): Metadata {
-        val revision = run.getAction(SCMRevisionAction::class.java)?.revision ?: return Metadata()
+    private fun revisionMetadata(actionable: Actionable): Metadata {
+        val revision = actionable.getAction(SCMRevisionAction::class.java)?.revision ?: return Metadata()
         return when (revision) {
             is CnbPullRequestSCMRevision -> {
                 Metadata(

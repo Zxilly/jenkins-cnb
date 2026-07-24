@@ -150,6 +150,7 @@ internal class CnbBuildMetadataDispatchRuntime(
     private val pendingCapacity: Int = DEFAULT_PENDING_CAPACITY,
     private val clockMillis: () -> Long = System::currentTimeMillis,
     private val recoveryRequests: CnbBuildMetadataRecoveryGate = CNB_BUILD_METADATA_RECOVERY_REQUESTS,
+    private val requestRecovery: () -> Unit = { recoveryRequests.request() },
     private val saveRun: (Run<*, *>) -> Unit = { it.save() },
 ) {
     private val stateLock = Any()
@@ -290,6 +291,7 @@ internal class CnbBuildMetadataDispatchRuntime(
 
     private fun executeOne(work: Work) {
         var snapshot: CnbBuildMetadataSnapshot? = null
+        var requestRecoveryAfterActiveRemoval = false
         try {
             snapshot = work.action.snapshot() ?: return
             val result = reporter.report(snapshot, work.item)
@@ -301,16 +303,22 @@ internal class CnbBuildMetadataDispatchRuntime(
                 handleInterruption(work)
             } else {
                 logFailure(work, snapshot, e)
-                if (snapshot != null) handleApiFailure(work, snapshot, e)
+                if (snapshot != null) {
+                    requestRecoveryAfterActiveRemoval = handleApiFailure(work, snapshot, e)
+                }
             }
         } catch (e: Exception) {
             logFailure(work, snapshot, e)
             if (snapshot != null) {
-                handleUnexpectedFailure(work, snapshot)
+                requestRecoveryAfterActiveRemoval = handleUnexpectedFailure(work, snapshot)
             }
         } finally {
             removeActive(work.key)
-            requestDrain()
+            try {
+                if (requestRecoveryAfterActiveRemoval) requestRecovery()
+            } finally {
+                requestDrain()
+            }
         }
     }
 
@@ -318,16 +326,15 @@ internal class CnbBuildMetadataDispatchRuntime(
         work: Work,
         snapshot: CnbBuildMetadataSnapshot,
         failure: CnbApiException,
-    ) {
+    ): Boolean {
         if (!failure.retryable) {
             markReportedAndPersist(work, snapshot, null)
-            return
+            return false
         }
-        if (hasQueuedSuccessor(work.key)) return
+        if (hasQueuedSuccessor(work.key)) return false
         if (work.attempt >= RETRY_DELAYS_SECONDS.size) {
             logRetriesExhausted(work, snapshot)
-            markReportedAndPersist(work, snapshot, null)
-            return
+            return true
         }
 
         val baseDelay = RETRY_DELAYS_SECONDS[work.attempt]
@@ -339,6 +346,7 @@ internal class CnbBuildMetadataDispatchRuntime(
             ),
             "retry",
         )
+        return false
     }
 
     private fun handleInterruption(work: Work) {
@@ -358,12 +366,11 @@ internal class CnbBuildMetadataDispatchRuntime(
     private fun handleUnexpectedFailure(
         work: Work,
         snapshot: CnbBuildMetadataSnapshot,
-    ) {
-        if (hasQueuedSuccessor(work.key)) return
+    ): Boolean {
+        if (hasQueuedSuccessor(work.key)) return false
         if (work.attempt >= RETRY_DELAYS_SECONDS.size) {
             logRetriesExhausted(work, snapshot)
-            recoveryRequests.request()
-            return
+            return true
         }
         val baseDelay = RETRY_DELAYS_SECONDS[work.attempt]
         val delaySeconds = ThreadLocalRandom.current().nextLong(baseDelay * 4 / 5, baseDelay * 6 / 5 + 1)
@@ -374,6 +381,7 @@ internal class CnbBuildMetadataDispatchRuntime(
             ),
             "unexpected reporting failure",
         )
+        return false
     }
 
     private fun deferAfterWorkerRejection(work: Work) {
@@ -543,7 +551,7 @@ internal class CnbBuildMetadataDispatchRuntime(
     }
 
     private fun logOverflow() {
-        recoveryRequests.request()
+        requestRecovery()
         val now = clockMillis()
         val next = nextOverflowLogMillis.get()
         if (now < next || !nextOverflowLogMillis.compareAndSet(next, safeAddMillis(now, OVERFLOW_LOG_INTERVAL_MILLIS))) return

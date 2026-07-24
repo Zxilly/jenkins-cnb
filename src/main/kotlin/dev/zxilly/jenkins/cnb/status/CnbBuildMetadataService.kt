@@ -113,17 +113,28 @@ internal object CnbBuildMetadataService {
         if (!CnbBranchSourceReportingPolicy.forItem(run.parent).automaticReportingEnabled) return false
         val actions = run.getActions(CnbBuildMetadataAction::class.java).toList()
         if (actions.isEmpty()) return reportRun(run, state, listener = listener)
-        var scheduled = false
+        val stableActions = mutableListOf<CnbBuildMetadataAction>()
+        var handled = false
+        var changed = false
         for (action in actions) {
-            scheduled =
-                reportRun(
-                    run = run,
-                    state = state,
-                    suppliedConfiguration = action.configuration(),
-                    listener = listener,
-                ) || scheduled
+            val target = action.target()
+            if (target == null) {
+                handled =
+                    reportRun(
+                        run = run,
+                        state = state,
+                        suppliedConfiguration = action.configuration(),
+                        listener = listener,
+                    ) || handled
+                continue
+            }
+            changed = action.advance(target, state, run.fullDisplayName, absoluteUrl(run.url)) || changed
+            stableActions += action
+            handled = true
         }
-        return scheduled
+        if (changed) persist(run)
+        stableActions.forEach { CnbBuildMetadataDispatcher.schedule(run, it) }
+        return handled
     }
 
     fun reportQueued(item: Queue.WaitingItem) {
