@@ -146,7 +146,7 @@ class CnbReleaseWorkspaceStepsTest {
 
         val result =
             CnbReleaseWorkspaceTransfer.upload(
-                uploadRequest("plugin.hpi"),
+                uploadRequest("plugin.hpi", ttlDays = 180),
                 context,
                 client,
                 FilePath(workspacePath.toFile()),
@@ -155,7 +155,40 @@ class CnbReleaseWorkspaceStepsTest {
             ) as Map<*, *>
 
         assertEquals("uploaded", result["operation"])
+        assertEquals(180, result["ttlDays"])
         assertEquals(0, uploads)
+    }
+
+    @Test
+    fun `fresh upload never claims an unapplied TTL from preexisting matching content`() {
+        val workspacePath = temporaryDirectory.resolve("fresh-upload-preexisting-match")
+        Files.createDirectories(workspacePath)
+        Files.writeString(workspacePath.resolve("plugin.hpi"), "plugin")
+        var uploadedRequest: CnbReleaseAssetUploadRequest? = null
+        val client =
+            client(
+                mapOf(
+                    "getRelease" to { releaseWithAsset("plugin".toByteArray()) },
+                    "uploadReleaseAsset" to { args ->
+                        uploadedRequest = requireNotNull(args)[2] as CnbReleaseAssetUploadRequest
+                        throw IllegalStateException("asset already exists")
+                    },
+                ),
+            )
+
+        val failure =
+            assertThrows(IllegalStateException::class.java) {
+                CnbReleaseWorkspaceTransfer.upload(
+                    uploadRequest("plugin.hpi", ttlDays = 7),
+                    context,
+                    client,
+                    FilePath(workspacePath.toFile()),
+                    resumed = false,
+                )
+            }
+
+        assertEquals("asset already exists", failure.message)
+        assertEquals(7, uploadedRequest?.ttlDays)
     }
 
     @Test
@@ -392,7 +425,7 @@ class CnbReleaseWorkspaceStepsTest {
     }
 
     @Test
-    fun `new upload execution converges after verification and immediate inspection both fail`() {
+    fun `new upload execution does not converge from another execution's matching content`() {
         val workspacePath = temporaryDirectory.resolve("cross-execution-verification-loss")
         Files.createDirectories(workspacePath)
         Files.writeString(workspacePath.resolve("plugin.hpi"), "plugin")
@@ -428,17 +461,20 @@ class CnbReleaseWorkspaceStepsTest {
                 transferId = "12345678-1234-1234-1234-123456789abc",
             )
         }
-        val result =
-            CnbReleaseWorkspaceTransfer.upload(
-                uploadRequest("plugin.hpi"),
-                context,
-                client,
-                workspace,
-                transferId = "abcdefab-1234-1234-1234-abcdefabcdef",
-            ) as Map<*, *>
+        val failure =
+            assertThrows(IllegalStateException::class.java) {
+                CnbReleaseWorkspaceTransfer.upload(
+                    uploadRequest("plugin.hpi"),
+                    context,
+                    client,
+                    workspace,
+                    transferId = "abcdefab-1234-1234-1234-abcdefabcdef",
+                )
+            }
 
-        assertEquals("uploaded", result["operation"])
-        assertEquals(1, uploads)
+        assertEquals("verification response lost", failure.message)
+        assertEquals(2, uploads)
+        assertEquals(3, inspections)
         assertTrue(Files.list(workspacePath).use { paths -> paths.noneMatch { it.fileName.toString().startsWith(".cnb-upload-") } })
     }
 

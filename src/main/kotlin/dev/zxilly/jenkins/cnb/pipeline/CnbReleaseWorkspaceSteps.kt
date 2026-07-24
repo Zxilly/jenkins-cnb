@@ -204,7 +204,8 @@ internal object CnbReleaseWorkspaceTransfer {
             } else {
                 when (inspectResumedUpload(request, context, client, snapshot)) {
                     RemoteUploadState.MATCH -> {
-                        return uploadResult(request, snapshot.size)
+                        if (resumed) return uploadResult(request, snapshot.size)
+                        preState = RemoteUploadPreState.KNOWN_MATCH
                     }
 
                     RemoteUploadState.CONFLICT -> {
