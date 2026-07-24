@@ -30,6 +30,7 @@ import java.security.MessageDigest
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
+import java.time.OffsetDateTime
 import java.time.ZoneOffset
 import java.time.ZonedDateTime
 import java.time.temporal.ChronoUnit
@@ -198,7 +199,7 @@ class CnbRepositoryEventPollingWork
                         repositoryPath = repositoryPath,
                         consumer =
                             CnbRepositoryEventConsumer(
-                                stableKey = "1\u0000${candidate.fullName}",
+                                stableKey = classicJobEventConsumerScope(candidate),
                                 description = "job ${candidate.fullName}",
                             ) { events ->
                                 CnbPushTriggerRecovery.recover(
@@ -652,6 +653,14 @@ internal object CnbRepositoryEventClassifier {
         TAG,
     }
 
+    data class RefTransition(
+        val event: CnbRepositoryEvent,
+        val ref: String,
+        val kind: RefKind,
+        val commit: String?,
+        val lifecycle: CnbRefLifecycleTransition,
+    )
+
     fun isRelevant(event: CnbRepositoryEvent): Boolean =
         when (event.type.wireValue.lowercase(Locale.ROOT)) {
             "pushevent", "pullrequestevent" -> {
@@ -708,6 +717,79 @@ internal object CnbRepositoryEventClassifier {
         val head = event.payload.head.trim()
         return head.length in GIT_OBJECT_ID_LENGTHS && head.all { it == '0' }
     }
+
+    fun refTransition(
+        serverId: String,
+        repositoryPath: String,
+        event: CnbRepositoryEvent,
+    ): RefTransition? {
+        val type = event.type.wireValue.lowercase(Locale.ROOT)
+        val ref: String
+        val kind: RefKind
+        val commit: String?
+        val present: Boolean
+        when (type) {
+            "pushevent" -> {
+                ref = pushRef(event) ?: return null
+                kind = pushRefKind(event) ?: return null
+                commit = pushCommit(event)
+                present = commit != null
+                if (!present && !isPushDeletion(event)) return null
+            }
+
+            "deleteevent" -> {
+                ref = normalizedRef(event.payload.ref) ?: return null
+                kind =
+                    when (event.payload.refType) {
+                        CnbRepositoryRefType.BRANCH -> RefKind.BRANCH
+                        CnbRepositoryRefType.TAG -> RefKind.TAG
+                        else -> return null
+                    }
+                val raw = event.payload.ref.trim()
+                if (raw.startsWith("refs/heads/") && kind != RefKind.BRANCH) return null
+                if (raw.startsWith("refs/tags/") && kind != RefKind.TAG) return null
+                commit = null
+                present = false
+            }
+
+            else -> return null
+        }
+        val occurredAt = parseCreatedAt(event.createdAt) ?: return null
+        val qualifiedRef = if (kind == RefKind.TAG) "refs/tags/$ref" else "refs/heads/$ref"
+        return RefTransition(
+            event,
+            ref,
+            kind,
+            commit,
+            CnbRefLifecycleTransition(
+                qualifiedRef,
+                present,
+                occurredAt,
+                stableLifecycleEventId(
+                    event.id,
+                    CnbRepositoryEventPollingWork.eventKey(serverId, repositoryPath, event),
+                ),
+            ),
+        )
+    }
+
+    private fun normalizedRef(rawValue: String): String? {
+        val raw = rawValue.trim()
+        val normalized =
+            when {
+                raw.startsWith("refs/heads/") -> raw.removePrefix("refs/heads/")
+                raw.startsWith("refs/tags/") -> raw.removePrefix("refs/tags/")
+                else -> raw
+            }.trim()
+        return normalized.takeIf {
+            it.isNotEmpty() && it.length <= 1024 && it.none { character -> character.code < 0x20 || character.code == 0x7f }
+        }
+    }
+
+    private fun parseCreatedAt(value: String): Instant? =
+        runCatching { Instant.parse(value) }
+            .recoverCatching { OffsetDateTime.parse(value).toInstant() }
+            .getOrNull()
 
     private val CODE_REF_TYPES = setOf(CnbRepositoryRefType.BRANCH, CnbRepositoryRefType.TAG)
     private val GIT_OBJECT_ID_LENGTHS = setOf(40, 64)
@@ -850,43 +932,57 @@ internal object CnbPushTriggerRecovery {
             verifiedCommit(serverId, repository, commit)
         },
         loadSourceCloneUrl: () -> String? = { verifiedCloneUrl(serverId, repositoryPath) },
+        lifecycleStore: CnbRefLifecycleStore = CnbRefLifecycleStores.current(),
     ) {
-        data class RecoveredPush(
-            val event: CnbRepositoryEvent,
-            val ref: String,
-            val commit: String?,
-            val kind: CnbRepositoryEventClassifier.RefKind,
-        )
-
-        val pushesByRef = linkedMapOf<String, MutableList<RecoveredPush>>()
+        val pushesByRef = linkedMapOf<String, MutableList<CnbRepositoryEventClassifier.RefTransition>>()
         events.forEach { event ->
-            val ref = CnbRepositoryEventClassifier.pushRef(event) ?: return@forEach
-            val kind = CnbRepositoryEventClassifier.pushRefKind(event) ?: return@forEach
-            val commit = CnbRepositoryEventClassifier.pushCommit(event)
-            if (commit == null && !CnbRepositoryEventClassifier.isPushDeletion(event)) return@forEach
-            val qualifiedRef = if (kind == CnbRepositoryEventClassifier.RefKind.TAG) "refs/tags/$ref" else "refs/heads/$ref"
-            pushesByRef.getOrPut(qualifiedRef) { ArrayList() } += RecoveredPush(event, ref, commit, kind)
+            val transition = CnbRepositoryEventClassifier.refTransition(serverId, repositoryPath, event) ?: return@forEach
+            pushesByRef.getOrPut(transition.lifecycle.qualifiedRef) { ArrayList() } += transition
         }
         if (pushesByRef.isEmpty()) return
-        if (!candidate.isBuildable) return
 
         var schedulingFailure: RuntimeException? = null
         val retryKeys = linkedSetOf<String>()
-        for ((qualifiedRef, recovered) in pushesByRef) {
-            val push = recovered.last()
-            val pushCommit = push.commit ?: continue
-            val event = if (push.kind == CnbRepositoryEventClassifier.RefKind.TAG) CnbWebhookEvent.TAG_PUSH else CnbWebhookEvent.PUSH
-            if (!CnbEventFilter.matches(trigger.getEventFilter(), event)) continue
-            val matches =
-                try {
-                    CnbRefGlob.matches(trigger.getRefFilter(), push.ref)
-                } catch (failure: IllegalArgumentException) {
-                    LOGGER.log(Level.WARNING, "Invalid CNB branch filter on ${candidate.fullName}", failure)
-                    false
-                }
-            if (!matches) continue
+        val lifecycleScope = classicJobRefLifecycleScope(serverId, repositoryPath, candidate)
+        for ((_, unordered) in pushesByRef) {
+            val recovered =
+                unordered.sortedWith(
+                    Comparator { left, right ->
+                        val time = left.lifecycle.occurredAt.compareTo(right.lifecycle.occurredAt)
+                        if (time != 0) {
+                            time
+                        } else {
+                            compareLifecycleEventIds(left.lifecycle.stableEventId, right.lifecycle.stableEventId)
+                        }
+                    },
+                )
             try {
-                val identity = CnbQueueIdentity(serverId, repositoryPath, qualifiedRef, pushCommit.lowercase(Locale.ROOT))
+                val lifecycleResults =
+                    lifecycleStore.apply(
+                        recovered.map { transition -> CnbScopedRefLifecycleTransition(lifecycleScope, transition.lifecycle) },
+                    )
+                val push = recovered.last()
+                val lifecycle = lifecycleResults.last()
+                val pushCommit = push.commit
+                if (!lifecycle.current || !lifecycle.present || pushCommit == null || !candidate.isBuildable) continue
+                val event = if (push.kind == CnbRepositoryEventClassifier.RefKind.TAG) CnbWebhookEvent.TAG_PUSH else CnbWebhookEvent.PUSH
+                if (!CnbEventFilter.matches(trigger.getEventFilter(), event)) continue
+                val matches =
+                    try {
+                        CnbRefGlob.matches(trigger.getRefFilter(), push.ref)
+                    } catch (failure: IllegalArgumentException) {
+                        LOGGER.log(Level.WARNING, "Invalid CNB branch filter on ${candidate.fullName}", failure)
+                        false
+                    }
+                if (!matches) continue
+                val identity =
+                    CnbQueueIdentity(
+                        serverId,
+                        repositoryPath,
+                        push.lifecycle.qualifiedRef,
+                        pushCommit.lowercase(Locale.ROOT),
+                        refGeneration = lifecycle.generation,
+                    )
                 if (trigger.isCiSkip()) {
                     val commit = getCommit(repositoryPath, identity.sha) ?: continue
                     if (!commit.sha.equals(identity.sha, ignoreCase = true) || CnbCiSkip.matches(commit.message)) continue

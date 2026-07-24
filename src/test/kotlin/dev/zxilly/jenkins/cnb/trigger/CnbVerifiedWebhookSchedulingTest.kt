@@ -27,6 +27,7 @@ import hudson.plugins.git.GitSCM
 import hudson.plugins.git.RevisionParameterAction
 import org.eclipse.jgit.api.Git
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -669,6 +670,56 @@ class CnbVerifiedWebhookSchedulingTest {
         assertEquals(1, CnbAtomicQueueScheduler.schedule(listOf(candidate(SHA_A, "delivery-a-return"))))
         jenkins.waitUntilNoActivity()
         assertEquals(4, job.builds.count())
+    }
+
+    @Test
+    @WithJenkins
+    fun `push-only webhook observer rebuilds same SHA after verified deletion and store restart`(jenkins: JenkinsRule) {
+        val job = jenkins.createFreeStyleProject("webhook-ref-recreation")
+        val trigger = CnbPushTrigger("primary", "team/project", "main").apply { setCiSkip(false) }
+        val observer = CnbClassicTriggerCandidate(job, trigger)
+        val path = Files.createTempDirectory("cnb-ref-lifecycle").resolve("state.journal")
+        var store = CnbRefLifecycleStore(path)
+        val first = pushDelivery(SHA_A, "1").let { delivery ->
+            delivery.copy(payload = delivery.payload.copy(occurredAt = Instant.EPOCH.plusSeconds(1)))
+        }
+        val deletion =
+            CnbWebhookDelivery(
+                "primary",
+                basePayload(CnbWebhookEvent.BRANCH_DELETE).copy(
+                    deliveryId = "2",
+                    occurredAt = Instant.EPOCH.plusSeconds(2),
+                    ref = CnbWebhookRef("main", "", SHA_A, "", false),
+                ),
+                "test",
+            )
+        val recreated = pushDelivery(SHA_A, "3").let { delivery ->
+            delivery.copy(payload = delivery.payload.copy(occurredAt = Instant.EPOCH.plusSeconds(3)))
+        }
+
+        fun candidate(delivery: CnbWebhookDelivery) =
+            CnbVerifiedQueueCandidate(job, delivery, requireNotNull(CnbQueueIdentity.from(delivery)))
+
+        val firstCandidate = CnbWebhookRefLifecycle.applyVerified(first, listOf(observer), listOf(candidate(first)), store).single()
+        assertEquals(0L, firstCandidate.identity.refGeneration)
+        assertEquals(1, CnbAtomicQueueScheduler.schedule(listOf(firstCandidate)))
+        jenkins.waitUntilNoActivity()
+
+        assertFalse(trigger.matches(deletion), "branch deletion is not a default build event")
+        assertTrue(trigger.observesRefLifecycle(deletion))
+        assertTrue(CnbWebhookRefLifecycle.applyVerified(deletion, listOf(observer), emptyList(), store).isEmpty())
+        assertEquals(1, job.builds.count(), "observing a deletion must not schedule it")
+
+        store = CnbRefLifecycleStore(path)
+        val recreatedCandidate =
+            CnbWebhookRefLifecycle.applyVerified(recreated, listOf(observer), listOf(candidate(recreated)), store).single()
+        assertEquals(1L, recreatedCandidate.identity.refGeneration)
+        assertEquals(1, CnbAtomicQueueScheduler.schedule(listOf(recreatedCandidate)))
+        jenkins.waitUntilNoActivity()
+        assertEquals(2, job.builds.count())
+
+        val replay = CnbWebhookRefLifecycle.applyVerified(recreated, listOf(observer), listOf(candidate(recreated)), store).single()
+        assertEquals(0, CnbAtomicQueueScheduler.schedule(listOf(replay)))
     }
 
     private fun pullRequestTrigger(requiredLabels: String = ""): CnbPushTrigger =

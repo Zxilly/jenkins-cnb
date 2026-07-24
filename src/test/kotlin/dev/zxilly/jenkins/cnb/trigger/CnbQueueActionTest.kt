@@ -71,6 +71,15 @@ class CnbQueueActionTest {
     }
 
     @Test
+    fun `same SHA in a recreated ref generation is a distinct revision`() {
+        val original = CnbQueueIdentity("primary", "team/project", "refs/heads/main", SHA_A)
+        val recreated = original.copy(refGeneration = 1L)
+
+        assertTrue(CnbQueueAction(recreated).shouldSchedule(listOf(CnbQueueAction(original))))
+        assertTrue(CnbQueueAction(original).isSupersededBy(recreated))
+    }
+
+    @Test
     fun `queue identity preserves a complete SHA-256 revision`() {
         val sha256 = "d".repeat(64)
 

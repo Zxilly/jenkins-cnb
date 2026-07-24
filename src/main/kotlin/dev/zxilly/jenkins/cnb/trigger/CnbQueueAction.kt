@@ -23,7 +23,12 @@ data class CnbQueueIdentity(
     val ref: String,
     val sha: String,
     val targetSha: String? = null,
+    val refGeneration: Long = 0L,
 ) : Serializable {
+    init {
+        require(refGeneration >= 0L) { "ref generation must not be negative" }
+    }
+
     companion object {
         private const val serialVersionUID = 1L
 
@@ -100,7 +105,9 @@ class CnbQueueAction(
         identity.serverId == incoming.serverId &&
             identity.repositoryPath == incoming.repositoryPath &&
             identity.ref == incoming.ref &&
-            (identity.sha != incoming.sha || identity.targetSha != incoming.targetSha)
+            (identity.sha != incoming.sha ||
+                identity.targetSha != incoming.targetSha ||
+                identity.refGeneration != incoming.refGeneration)
 
     companion object {
         private const val serialVersionUID = 1L

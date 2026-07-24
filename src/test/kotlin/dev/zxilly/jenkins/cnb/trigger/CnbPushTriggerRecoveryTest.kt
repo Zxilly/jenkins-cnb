@@ -2,6 +2,7 @@ package dev.zxilly.jenkins.cnb.trigger
 
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryEvent
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryEventPayload
+import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryRefType
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryEventType
 import dev.zxilly.jenkins.cnb.status.CnbBuildMetadataConfiguration
 import dev.zxilly.jenkins.cnb.status.CnbBuildMetadataResolver
@@ -139,7 +140,7 @@ class CnbPushTriggerRecoveryTest {
             "team/project",
             listOf(
                 push("event-main-a", "refs/heads/main", "a".repeat(40)),
-                push("event-main-delete", "refs/heads/main", "0".repeat(40)),
+                push("event-main-delete", "refs/heads/main", "0".repeat(40), "2026-07-15T10:16:00Z"),
             ),
             project,
             trigger,
@@ -161,8 +162,8 @@ class CnbPushTriggerRecoveryTest {
             "team/project",
             listOf(
                 push("event-main-a", "refs/heads/main", "a".repeat(40)),
-                push("event-main-delete", "refs/heads/main", "0".repeat(40)),
-                push("event-main-b", "refs/heads/main", finalSha),
+                push("event-main-delete", "refs/heads/main", "0".repeat(40), "2026-07-15T10:16:00Z"),
+                push("event-main-b", "refs/heads/main", finalSha, "2026-07-15T10:17:00Z"),
             ),
             project,
             trigger,
@@ -173,6 +174,91 @@ class CnbPushTriggerRecoveryTest {
         val build = requireNotNull(project.lastBuild)
         assertEquals(finalSha, requireNotNull(build.getAction(CnbQueueAction::class.java)).sha)
         assertEquals("event-main-b", requireNotNull(build.getCause(CnbRepositoryEventCause::class.java)).eventId)
+    }
+
+    @Test
+    fun `chronological and reversed push delete push batches select the recreated ref`(jenkins: JenkinsRule) {
+        val sha = "a".repeat(40)
+        val transitions =
+            listOf(
+                push("1", "refs/heads/main", sha, "2026-07-15T10:15:00Z"),
+                delete("2", "main", "2026-07-15T10:16:00Z"),
+                push("3", "refs/heads/main", sha, "2026-07-15T10:17:00Z"),
+            )
+
+        for ((name, events) in listOf("chronological" to transitions, "reversed" to transitions.reversed())) {
+            val project = jenkins.createFreeStyleProject("$name-ref-recovery")
+            val trigger = CnbPushTrigger("primary", "team/project", "main").apply { setCiSkip(false) }
+            CnbPushTriggerRecovery.recover("primary", "team/project", events, project, trigger)
+            jenkins.waitUntilNoActivity()
+
+            assertEquals(1, project.builds.count(), name)
+            val action = requireNotNull(requireNotNull(project.lastBuild).getAction(CnbQueueAction::class.java))
+            assertEquals(sha, action.sha)
+            assertEquals(1L, action.identity.refGeneration)
+        }
+    }
+
+    @Test
+    fun `actual delete event lets polling rebuild the same SHA in a new lifecycle`(jenkins: JenkinsRule) {
+        val project = jenkins.createFreeStyleProject("same-sha-recreated-ref")
+        val trigger = CnbPushTrigger("primary", "team/project", "main").apply { setCiSkip(false) }
+        val sha = "a".repeat(40)
+
+        CnbPushTriggerRecovery.recover(
+            "primary",
+            "team/project",
+            listOf(push("1", "refs/heads/main", sha, "2026-07-15T10:15:00Z")),
+            project,
+            trigger,
+        )
+        jenkins.waitUntilNoActivity()
+        CnbPushTriggerRecovery.recover(
+            "primary",
+            "team/project",
+            listOf(delete("2", "main", "2026-07-15T10:16:00Z")),
+            project,
+            trigger,
+        )
+        jenkins.waitUntilNoActivity()
+        assertEquals(1, project.builds.count(), "a deletion tombstone must not schedule a push build")
+
+        CnbPushTriggerRecovery.recover(
+            "primary",
+            "team/project",
+            listOf(push("3", "refs/heads/main", sha, "2026-07-15T10:17:00Z")),
+            project,
+            trigger,
+        )
+        jenkins.waitUntilNoActivity()
+
+        assertEquals(2, project.builds.count())
+        val recreated = requireNotNull(project.lastBuild)
+        assertEquals(1L, requireNotNull(recreated.getAction(CnbQueueAction::class.java)).identity.refGeneration)
+    }
+
+    @Test
+    fun `same timestamp numeric IDs use numeric order in a reversed archive response`(jenkins: JenkinsRule) {
+        val project = jenkins.createFreeStyleProject("numeric-event-order")
+        val trigger = CnbPushTrigger("primary", "team/project", "main").apply { setCiSkip(false) }
+        val at = "2026-07-15T10:15:00Z"
+        val sha = "a".repeat(40)
+
+        CnbPushTriggerRecovery.recover(
+            "primary",
+            "team/project",
+            listOf(
+                push("10", "refs/heads/main", sha, at),
+                delete("9", "main", at),
+            ),
+            project,
+            trigger,
+        )
+        jenkins.waitUntilNoActivity()
+
+        assertEquals(1, project.builds.count())
+        val build = requireNotNull(project.lastBuild)
+        assertEquals(sha, requireNotNull(build.getAction(CnbQueueAction::class.java)).sha)
     }
 
     @Test
@@ -218,12 +304,26 @@ class CnbPushTriggerRecoveryTest {
         id: String,
         ref: String,
         head: String,
+        createdAt: String = "2026-07-15T10:15:00Z",
     ): CnbRepositoryEvent =
         CnbRepositoryEvent(
             id = id,
             type = CnbRepositoryEventType("PushEvent"),
             repositoryPath = "team/project",
-            createdAt = "2026-07-15T10:15:00Z",
+            createdAt = createdAt,
             payload = CnbRepositoryEventPayload(ref = ref, head = head),
+        )
+
+    private fun delete(
+        id: String,
+        ref: String,
+        createdAt: String,
+    ): CnbRepositoryEvent =
+        CnbRepositoryEvent(
+            id = id,
+            type = CnbRepositoryEventType("DeleteEvent"),
+            repositoryPath = "team/project",
+            createdAt = createdAt,
+            payload = CnbRepositoryEventPayload(ref = ref, refType = CnbRepositoryRefType.BRANCH),
         )
 }
