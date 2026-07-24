@@ -40,6 +40,31 @@ internal class CnbReplayClaimToken internal constructor(
     internal val leaseId: String,
 )
 
+internal interface CnbWebhookReplayStore {
+    fun claim(
+        scope: String,
+        key: String,
+        now: Instant,
+        leaseTtl: Duration = Duration.ofSeconds(60),
+    ): CnbReplayClaimResult
+
+    fun complete(
+        token: CnbReplayClaimToken,
+        now: Instant,
+        ttl: Duration,
+    )
+
+    fun completeLocally(
+        token: CnbReplayClaimToken,
+        now: Instant,
+        ttl: Duration,
+    )
+
+    fun release(token: CnbReplayClaimToken)
+
+    fun abandon(token: CnbReplayClaimToken)
+}
+
 /**
  * Durable, bounded replay state for authenticated webhook deliveries.
  *
@@ -56,7 +81,7 @@ internal class CnbReplayCache(
     private val maxJournalBytes: Long = DEFAULT_MAX_JOURNAL_BYTES,
     private val compactionThreshold: Int = DEFAULT_COMPACTION_THRESHOLD,
     private val clock: Clock = Clock.systemUTC(),
-) {
+) : CnbWebhookReplayStore {
     private enum class State {
         IN_FLIGHT,
         COMPLETED,
@@ -104,11 +129,11 @@ internal class CnbReplayCache(
     }
 
     @Synchronized
-    fun claim(
+    override fun claim(
         scope: String,
         key: String,
         now: Instant,
-        leaseTtl: Duration = DEFAULT_IN_FLIGHT_LEASE,
+        leaseTtl: Duration,
     ): CnbReplayClaimResult {
         require(scope.isNotBlank()) { "Replay cache scope must not be blank" }
         require(key.isNotBlank()) { "Replay cache key must not be blank" }
@@ -157,7 +182,7 @@ internal class CnbReplayCache(
     }
 
     @Synchronized
-    fun complete(
+    override fun complete(
         token: CnbReplayClaimToken,
         now: Instant,
         ttl: Duration,
@@ -185,7 +210,24 @@ internal class CnbReplayCache(
     }
 
     @Synchronized
-    fun release(token: CnbReplayClaimToken) {
+    override fun completeLocally(
+        token: CnbReplayClaimToken,
+        now: Instant,
+        ttl: Duration,
+    ) {
+        requirePositive(ttl, "Replay cache completed TTL")
+        val existing =
+            entries[token.scopeHash]?.get(token.keyHash)
+                ?: throw CnbReplayOwnershipException()
+        if (existing.state != State.IN_FLIGHT || existing.leaseId != token.leaseId || !existing.locallyOwned) {
+            throw CnbReplayOwnershipException()
+        }
+        entries.getOrPut(token.scopeHash) { LinkedHashMap() }[token.keyHash] =
+            Entry(State.COMPLETED, now.plus(ttl), null, locallyOwned = false)
+    }
+
+    @Synchronized
+    override fun release(token: CnbReplayClaimToken) {
         val scopedEntries = entries[token.scopeHash] ?: return
         val existing = scopedEntries[token.keyHash] ?: return
         if (existing.state != State.IN_FLIGHT || existing.leaseId != token.leaseId || !existing.locallyOwned) return
@@ -208,7 +250,7 @@ internal class CnbReplayCache(
      * suppresses immediate retries until it expires, after which another request can recover it.
      */
     @Synchronized
-    fun abandon(token: CnbReplayClaimToken) {
+    override fun abandon(token: CnbReplayClaimToken) {
         val scopedEntries = entries[token.scopeHash] ?: return
         val existing = scopedEntries[token.keyHash] ?: return
         if (existing.state == State.IN_FLIGHT && existing.leaseId == token.leaseId && existing.locallyOwned) {
@@ -610,7 +652,6 @@ internal class CnbReplayCache(
         private const val CHECKSUM_HEX_LENGTH = 8
         private const val LEASE_ID_BYTES = 16
         private const val NO_LEASE = "-"
-        private val DEFAULT_IN_FLIGHT_LEASE = Duration.ofSeconds(60)
         private val HASH_PATTERN = Regex("[0-9a-f]{64}")
         private val LEASE_PATTERN = Regex("[0-9a-f]{32}")
         private val LEGACY_PROPERTY_PATTERN = Regex("([0-9a-f]{64})\\s*[=:]\\s*([0-9]+)")

@@ -3,6 +3,8 @@ package dev.zxilly.jenkins.cnb.webhook
 import dev.zxilly.jenkins.cnb.config.CnbServer
 import java.time.Clock
 import java.time.Duration
+import java.util.logging.Level
+import java.util.logging.Logger
 
 data class CnbWebhookDelivery(
     val serverId: String,
@@ -45,7 +47,7 @@ internal class CnbWebhookProcessor(
     private val serverLookup: CnbWebhookServerLookup,
     private val secretProvider: CnbWebhookSecretProvider,
     private val dispatcher: CnbWebhookDispatcher,
-    private val replayCache: CnbReplayCache = CnbReplayCache(),
+    private val replayCache: CnbWebhookReplayStore = CnbReplayCache(),
     private val clock: Clock = Clock.systemUTC(),
 ) {
     fun process(
@@ -144,13 +146,23 @@ internal class CnbWebhookProcessor(
             try {
                 replayCache.complete(claim, clock.instant(), ttl)
             } catch (e: Exception) {
-                replayCache.abandon(claim)
-                throw CnbWebhookRequestException(
-                    503,
-                    "Webhook replay protection is temporarily unavailable",
-                    "completed delivery could not be persisted",
-                    e,
-                )
+                try {
+                    replayCache.completeLocally(claim, clock.instant(), ttl)
+                    LOGGER.log(
+                        Level.WARNING,
+                        "CNB webhook delivery completed but its durable replay record could not be persisted ({0})",
+                        e.javaClass.simpleName,
+                    )
+                } catch (localFailure: Exception) {
+                    localFailure.addSuppressed(e)
+                    replayCache.abandon(claim)
+                    throw CnbWebhookRequestException(
+                        503,
+                        "Webhook replay protection is temporarily unavailable",
+                        "completed delivery could not be fenced",
+                        localFailure,
+                    )
+                }
             }
             return CnbWebhookProcessingResult(delivery, duplicate = false)
         } finally {
@@ -159,6 +171,7 @@ internal class CnbWebhookProcessor(
     }
 
     companion object {
+        private val LOGGER = Logger.getLogger(CnbWebhookProcessor::class.java.name)
         private const val FUTURE_SKEW_SECONDS = 60L
     }
 }

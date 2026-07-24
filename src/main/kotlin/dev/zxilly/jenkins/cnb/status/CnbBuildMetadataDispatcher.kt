@@ -306,7 +306,7 @@ internal class CnbBuildMetadataDispatchRuntime(
         } catch (e: Exception) {
             logFailure(work, snapshot, e)
             if (snapshot != null) {
-                markReportedAndPersist(work, snapshot, null)
+                handleUnexpectedFailure(work, snapshot)
             }
         } finally {
             removeActive(work.key)
@@ -352,6 +352,27 @@ internal class CnbBuildMetadataDispatchRuntime(
             Level.FINE,
             "CNB build metadata reconciliation interrupted for build={0}; it remains pending",
             work.run?.externalizableId ?: work.item?.fullName ?: "queue-item",
+        )
+    }
+
+    private fun handleUnexpectedFailure(
+        work: Work,
+        snapshot: CnbBuildMetadataSnapshot,
+    ) {
+        if (hasQueuedSuccessor(work.key)) return
+        if (work.attempt >= RETRY_DELAYS_SECONDS.size) {
+            logRetriesExhausted(work, snapshot)
+            recoveryRequests.request()
+            return
+        }
+        val baseDelay = RETRY_DELAYS_SECONDS[work.attempt]
+        val delaySeconds = ThreadLocalRandom.current().nextLong(baseDelay * 4 / 5, baseDelay * 6 / 5 + 1)
+        requeue(
+            work.copy(
+                attempt = work.attempt + 1,
+                notBeforeMillis = safeAddMillis(clockMillis(), TimeUnit.SECONDS.toMillis(delaySeconds)),
+            ),
+            "unexpected reporting failure",
         )
     }
 

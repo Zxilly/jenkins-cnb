@@ -95,6 +95,40 @@ class CnbBuildMetadataDispatcherTest {
     }
 
     @Test
+    fun `unexpected reporting failure remains pending and recovers after configuration repair`() {
+        val action = pendingAction("configuration-repair")
+        val clock = FakeClock()
+        val wakeups = RecordingWakeups(clock)
+        val workers = SwitchableExecutor()
+        val reports = AtomicInteger()
+        val runtime =
+            CnbBuildMetadataDispatchRuntime(
+                workers = workers,
+                wakeups = wakeups,
+                reporter =
+                    CnbMetadataReporter { _, _ ->
+                        if (reports.getAndIncrement() == 0) throw IllegalArgumentException("credential unavailable")
+                        CnbBuildMetadataReportResult("comment-recovered")
+                    },
+                clockMillis = clock::now,
+            )
+
+        assertTrue(runtime.scheduleItem(null, action))
+        workers.runNext()
+
+        assertTrue(action.isPending())
+        assertEquals(1, runtime.retryAttempt(action))
+
+        clock.advance(wakeups.singleActive().delayMillis)
+        wakeups.runDue()
+        workers.runNext()
+
+        assertFalse(action.isPending())
+        assertEquals(2, reports.get())
+        runtime.shutdown()
+    }
+
+    @Test
     fun `capacity is bounded and all rejected keys share one drain wakeup`() {
         val clock = FakeClock()
         val wakeups = RecordingWakeups(clock)
