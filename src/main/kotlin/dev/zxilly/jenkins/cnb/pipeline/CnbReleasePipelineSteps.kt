@@ -676,13 +676,17 @@ private class CnbReleaseTransferStepExecution(
     override fun afterUnsuccessfulCompletion() {
         val workspace = context.get(FilePath::class.java)
         when (val current = request) {
-            is CnbReleaseStepRequest.UploadAsset ->
+            is CnbReleaseStepRequest.UploadAsset -> {
                 CnbReleaseWorkspaceTransfer.cleanupUploadSnapshot(workspace, current.workspacePath, transferId)
+            }
 
-            is CnbReleaseStepRequest.DownloadAsset ->
+            is CnbReleaseStepRequest.DownloadAsset -> {
                 CnbReleaseWorkspaceTransfer.cleanupDownloadTemporary(workspace, current.workspacePath, transferId)
+            }
 
-            else -> Unit
+            else -> {
+                Unit
+            }
         }
     }
 

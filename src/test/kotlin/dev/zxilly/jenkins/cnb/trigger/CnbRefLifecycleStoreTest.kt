@@ -92,8 +92,7 @@ class CnbRefLifecycleStoreTest {
         assertEquals(0L, replay.generation)
     }
 
-    private fun scope(consumer: String) =
-        CnbRepositoryEventStateScope("primary", "team/project", "server", consumer)
+    private fun scope(consumer: String) = CnbRepositoryEventStateScope("primary", "team/project", "server", consumer)
 
     private fun request(
         scope: CnbRepositoryEventStateScope,

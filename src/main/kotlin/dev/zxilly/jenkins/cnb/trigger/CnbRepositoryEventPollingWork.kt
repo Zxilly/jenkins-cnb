@@ -10,8 +10,8 @@ import dev.zxilly.jenkins.cnb.health.CnbOperationalHealth
 import dev.zxilly.jenkins.cnb.scm.CnbSCMSource
 import dev.zxilly.jenkins.cnb.webhook.CnbWebhookEvent
 import hudson.Extension
-import hudson.model.AsyncPeriodicWork
 import hudson.model.Action
+import hudson.model.AsyncPeriodicWork
 import hudson.model.Cause
 import hudson.model.CauseAction
 import hudson.model.Item
@@ -752,7 +752,9 @@ internal object CnbRepositoryEventClassifier {
                 present = false
             }
 
-            else -> return null
+            else -> {
+                return null
+            }
         }
         val occurredAt = parseCreatedAt(event.createdAt) ?: return null
         val qualifiedRef = if (kind == RefKind.TAG) "refs/tags/$ref" else "refs/heads/$ref"

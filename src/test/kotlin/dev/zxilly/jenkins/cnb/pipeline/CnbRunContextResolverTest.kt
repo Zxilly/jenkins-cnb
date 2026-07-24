@@ -146,10 +146,11 @@ class CnbRunContextResolverTest {
                 WorkflowMultiBranchProject::class.java,
                 "credential-source-pairing",
             )
-        val source = CnbSCMSource("server-a", "team/project").also {
-            it.withId("server-a-source")
-            it.setApiCredentialsId("server-a-token")
-        }
+        val source =
+            CnbSCMSource("server-a", "team/project").also {
+                it.withId("server-a-source")
+                it.setApiCredentialsId("server-a-token")
+            }
         project.sourcesList.add(BranchSource(source))
         val branch = Branch(source.id, CnbBranchSCMHead("master"), NullSCM(), emptyList())
         val job = project.projectFactory.newInstance(branch)

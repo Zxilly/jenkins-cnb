@@ -64,7 +64,9 @@ internal object CnbWebhookRefLifecycle {
                     currentObjectIdIsPresent(delivery)
                 }
 
-                else -> return null
+                else -> {
+                    return null
+                }
             }
         val prefix = if (payload.ref.tag || payload.event == CnbWebhookEvent.TAG_PUSH) "refs/tags/" else "refs/heads/"
         return CnbRefLifecycleTransition(

@@ -263,7 +263,14 @@ class CnbBuildMetadataReconciliationWorkTest {
             index.observe(item)
 
             assertEquals(1, index.size())
-            assertEquals(listOf(item.id), index.snapshotIterator().asSequence().map(Queue.Item::getId).toList())
+            assertEquals(
+                listOf(item.id),
+                index
+                    .snapshotIterator()
+                    .asSequence()
+                    .map(Queue.Item::getId)
+                    .toList(),
+            )
 
             val requests = CnbBuildMetadataRecoveryGate(startupRecovery = false)
             val scheduled = mutableListOf<CnbBuildMetadataAction>()

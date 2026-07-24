@@ -540,7 +540,12 @@ class CnbVerifiedWebhookSchedulingTest {
                 CnbQueueAction(originalIdentity, original.payload.deliveryId, CnbDeliveryScope.DIRECT),
             ),
         )
-        val queuedId = Queue.getInstance().items.single().id
+        val queuedId =
+            Queue
+                .getInstance()
+                .items
+                .single()
+                .id
         val scans = AtomicInteger()
 
         val replay = pushDelivery(SHA_B, original.payload.deliveryId)
@@ -680,9 +685,10 @@ class CnbVerifiedWebhookSchedulingTest {
         val observer = CnbClassicTriggerCandidate(job, trigger)
         val path = Files.createTempDirectory("cnb-ref-lifecycle").resolve("state.journal")
         var store = CnbRefLifecycleStore(path)
-        val first = pushDelivery(SHA_A, "1").let { delivery ->
-            delivery.copy(payload = delivery.payload.copy(occurredAt = Instant.EPOCH.plusSeconds(1)))
-        }
+        val first =
+            pushDelivery(SHA_A, "1").let { delivery ->
+                delivery.copy(payload = delivery.payload.copy(occurredAt = Instant.EPOCH.plusSeconds(1)))
+            }
         val deletion =
             CnbWebhookDelivery(
                 "primary",
@@ -693,9 +699,10 @@ class CnbVerifiedWebhookSchedulingTest {
                 ),
                 "test",
             )
-        val recreated = pushDelivery(SHA_A, "3").let { delivery ->
-            delivery.copy(payload = delivery.payload.copy(occurredAt = Instant.EPOCH.plusSeconds(3)))
-        }
+        val recreated =
+            pushDelivery(SHA_A, "3").let { delivery ->
+                delivery.copy(payload = delivery.payload.copy(occurredAt = Instant.EPOCH.plusSeconds(3)))
+            }
 
         fun candidate(delivery: CnbWebhookDelivery) =
             CnbVerifiedQueueCandidate(job, delivery, requireNotNull(CnbQueueIdentity.from(delivery)))
@@ -949,7 +956,11 @@ class CnbVerifiedWebhookSchedulingTest {
     private fun waitForLeftItem(queueId: Long): Queue.LeftItem {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
         while (System.nanoTime() < deadline) {
-            Queue.getInstance().leftItems.firstOrNull { it.id == queueId }?.let { return it }
+            Queue
+                .getInstance()
+                .leftItems
+                .firstOrNull { it.id == queueId }
+                ?.let { return it }
             Thread.sleep(25)
         }
         error("Queue item $queueId did not transition to a Run")

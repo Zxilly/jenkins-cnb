@@ -93,7 +93,7 @@ internal abstract class CnbRestartableAsyncStepExecution<T>(
                 } else {
                     null
                 }
-        }
+            }
         if (failure != null) {
             cleanupAfterUnsuccessfulCompletion(failure)
             context.onFailure(failure)
@@ -255,14 +255,19 @@ internal abstract class CnbRestartableAsyncStepExecution<T>(
                         true
                     }
 
-                    Phase.SUCCEEDED -> true
+                    Phase.SUCCEEDED -> {
+                        true
+                    }
+
                     Phase.STOPPED -> {
                         cleanupStopped = true
                         stoppedFailure = stopCause
                         false
                     }
 
-                    else -> false
+                    else -> {
+                        false
+                    }
                 }
             }
         if (shouldReport) {

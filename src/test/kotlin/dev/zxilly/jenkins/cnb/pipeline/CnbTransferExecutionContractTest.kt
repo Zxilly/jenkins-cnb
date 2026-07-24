@@ -18,8 +18,8 @@ import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.ArrayBlockingQueue
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
@@ -332,9 +332,7 @@ class CnbTransferExecutionContractTest {
                     resumed: Boolean,
                 ): String = "completed"
 
-                override fun afterCheckpoint(value: String) {
-                    throw IOException("workspace cleanup unavailable")
-                }
+                override fun afterCheckpoint(value: String): Unit = throw IOException("workspace cleanup unavailable")
 
                 override fun afterUnsuccessfulCompletion() {
                     unsuccessfulCleanups.incrementAndGet()
@@ -475,8 +473,7 @@ class CnbTransferExecutionContractTest {
         var value: Any? = null
 
         @Suppress("UNCHECKED_CAST")
-        override fun <T : Any?> get(key: Class<T>): T =
-            values[key] as? T ?: throw UnsupportedOperationException(key.name)
+        override fun <T : Any?> get(key: Class<T>): T = values[key] as? T ?: throw UnsupportedOperationException(key.name)
 
         override fun onSuccess(result: Any?) {
             value = result

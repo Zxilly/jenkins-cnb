@@ -2,10 +2,10 @@ package dev.zxilly.jenkins.cnb.trigger
 
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
+import dev.zxilly.jenkins.cnb.api.model.CnbCommit
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryEvent
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryEventPayload
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryEventType
-import dev.zxilly.jenkins.cnb.api.model.CnbCommit
 import dev.zxilly.jenkins.cnb.config.CnbGlobalConfiguration
 import dev.zxilly.jenkins.cnb.config.CnbServer
 import dev.zxilly.jenkins.cnb.health.CnbHealthComponent
@@ -47,9 +47,13 @@ class CnbRepositoryEventPollingWorkIntegrationTest {
         val trigger = CnbPushTrigger("primary", "team/project", "main").apply { setCiSkip(false) }
         val shaA = "a".repeat(40)
         val shaB = "b".repeat(40)
+
         fun identity(sha: String) = CnbQueueIdentity("primary", "team/project", "refs/heads/main", sha)
-        fun event(id: String, sha: String) =
-            repositoryEvent("team/project", id).copy(payload = CnbRepositoryEventPayload(ref = "refs/heads/main", head = sha))
+
+        fun event(
+            id: String,
+            sha: String,
+        ) = repositoryEvent("team/project", id).copy(payload = CnbRepositoryEventPayload(ref = "refs/heads/main", head = sha))
 
         jenkins.assertBuildStatusSuccess(
             project.scheduleBuild2(0, CnbQueueAction(identity(shaA), "webhook-a")),

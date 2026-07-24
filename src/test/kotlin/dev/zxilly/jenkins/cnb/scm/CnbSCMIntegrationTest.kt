@@ -21,9 +21,9 @@ import dev.zxilly.jenkins.cnb.config.CnbServer
 import hudson.model.TaskListener
 import hudson.plugins.git.GitChangeSet
 import hudson.plugins.git.GitSCM
-import hudson.plugins.git.util.BuildData
 import hudson.plugins.git.util.BuildChooser
 import hudson.plugins.git.util.BuildChooserContext
+import hudson.plugins.git.util.BuildData
 import jenkins.plugins.git.MergeWithGitSCMExtension
 import jenkins.scm.api.SCMHeadOrigin
 import jenkins.scm.api.mixin.ChangeRequestCheckoutStrategy

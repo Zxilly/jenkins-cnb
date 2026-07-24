@@ -212,7 +212,9 @@ internal object CnbReleaseWorkspaceTransfer {
                         throw AbortException("CNB upload found a different asset with the same name")
                     }
 
-                    RemoteUploadState.ABSENT -> preState = RemoteUploadPreState.ABSENT
+                    RemoteUploadState.ABSENT -> {
+                        preState = RemoteUploadPreState.ABSENT
+                    }
                 }
             }
             throwIfTransferInterrupted()

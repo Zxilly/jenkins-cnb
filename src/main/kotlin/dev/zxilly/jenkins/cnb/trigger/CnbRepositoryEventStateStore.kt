@@ -237,8 +237,14 @@ internal class CnbRefLifecycleStore(
 
     private fun applyLoaded(record: LifecycleRecord): Boolean {
         when (record.operation) {
-            Operation.DELETE -> entries.remove(record.refScopeHash)
-            Operation.FLOOR -> generationFloor = maxOf(generationFloor, record.generation)
+            Operation.DELETE -> {
+                entries.remove(record.refScopeHash)
+            }
+
+            Operation.FLOOR -> {
+                generationFloor = maxOf(generationFloor, record.generation)
+            }
+
             Operation.SET -> {
                 val occurredAt = instantOfEpochSecondAndNano(record.epochSecond, record.nano) ?: return false
                 entries[record.refScopeHash] =
@@ -274,11 +280,9 @@ internal class CnbRefLifecycleStore(
             entry.stableEventId,
         )
 
-    private fun deleteRecord(key: String): LifecycleRecord =
-        LifecycleRecord(Operation.DELETE, key, false, 0L, 0L, 0, ZERO_ID)
+    private fun deleteRecord(key: String): LifecycleRecord = LifecycleRecord(Operation.DELETE, key, false, 0L, 0L, 0, ZERO_ID)
 
-    private fun floorRecord(): LifecycleRecord =
-        LifecycleRecord(Operation.FLOOR, FLOOR_KEY, false, generationFloor, 0L, 0, ZERO_ID)
+    private fun floorRecord(): LifecycleRecord = LifecycleRecord(Operation.FLOOR, FLOOR_KEY, false, generationFloor, 0L, 0, ZERO_ID)
 
     private fun encode(record: LifecycleRecord): ByteArray =
         encodeJournalRecord(
@@ -298,17 +302,21 @@ internal class CnbRefLifecycleStore(
         val fields = verifiedJournalFields(line, REF_LIFECYCLE_MAGIC, 7) ?: return null
         val operation = Operation.entries.firstOrNull { it.code == fields[0] } ?: return null
         val key = fields[1].takeIf(STATE_KEY_PATTERN::matches) ?: return null
-        val present = when (fields[2]) {
-            "1" -> true
-            "0" -> false
-            else -> return null
-        }
+        val present =
+            when (fields[2]) {
+                "1" -> true
+                "0" -> false
+                else -> return null
+            }
         val generation = fields[3].toLongOrNull()?.takeIf { it >= 0 } ?: return null
         val epochSecond = fields[4].toLongOrNull() ?: return null
         val nano = fields[5].toIntOrNull()?.takeIf { it in 0..999_999_999 } ?: return null
         val eventId = decodeLifecycleEventId(fields[6]) ?: return null
         when (operation) {
-            Operation.SET -> Unit
+            Operation.SET -> {
+                Unit
+            }
+
             Operation.DELETE -> {
                 if (present || generation != 0L || epochSecond != 0L || nano != 0 || eventId != ZERO_ID) return null
             }

@@ -695,8 +695,7 @@ internal class HttpCnbClient(
     }
 
     private inner class RemovedPullLabelResponseReader : CnbHttpResponseReader<CnbLabel> {
-        override suspend fun read(response: CnbHttpResponseContext): CnbLabel =
-            readRemovedPullLabel(response)
+        override suspend fun read(response: CnbHttpResponseContext): CnbLabel = readRemovedPullLabel(response)
     }
 
     private suspend fun readRemovedPullLabel(response: CnbHttpResponseContext?): CnbLabel {
@@ -1931,8 +1930,10 @@ internal class HttpCnbClient(
                         }
                     if (
                         response.statusCode == 404 &&
-                        (acceptNotFound ||
-                            (method == "DELETE" && acceptNotFoundAfterRetryableFailure && retryableFailureSeen))
+                        (
+                            acceptNotFound ||
+                                (method == "DELETE" && acceptNotFoundAfterRetryableFailure && retryableFailureSeen)
+                        )
                     ) {
                         circuit.success()
                         return if (retryableFailureSeen) notFoundAfterRetryValue else null

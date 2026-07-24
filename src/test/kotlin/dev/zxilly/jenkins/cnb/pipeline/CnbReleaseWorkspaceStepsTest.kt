@@ -1048,18 +1048,19 @@ class CnbReleaseWorkspaceStepsTest {
             id = "release-1",
             tagName = "v1.0.0",
             assets =
-                bytes?.let {
-                    listOf(
-                        CnbReleaseAsset(
-                            id = "asset-1",
-                            name = "plugin.hpi",
-                            path = "plugin.hpi",
-                            size = it.size.toLong(),
-                            hashAlgorithm = "sha256",
-                            hashValue = MessageDigest.getInstance("SHA-256").digest(it).toHex(),
-                        ),
-                    )
-                }.orEmpty(),
+                bytes
+                    ?.let {
+                        listOf(
+                            CnbReleaseAsset(
+                                id = "asset-1",
+                                name = "plugin.hpi",
+                                path = "plugin.hpi",
+                                size = it.size.toLong(),
+                                hashAlgorithm = "sha256",
+                                hashValue = MessageDigest.getInstance("SHA-256").digest(it).toHex(),
+                            ),
+                        )
+                    }.orEmpty(),
         )
 
     @Suppress("UNCHECKED_CAST")

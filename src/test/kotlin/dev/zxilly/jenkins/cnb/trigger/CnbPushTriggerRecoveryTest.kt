@@ -2,8 +2,8 @@ package dev.zxilly.jenkins.cnb.trigger
 
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryEvent
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryEventPayload
-import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryRefType
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryEventType
+import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryRefType
 import dev.zxilly.jenkins.cnb.status.CnbBuildMetadataConfiguration
 import dev.zxilly.jenkins.cnb.status.CnbBuildMetadataResolver
 import hudson.EnvVars
@@ -293,7 +293,16 @@ class CnbPushTriggerRecoveryTest {
                 setOf(CnbRepositoryEventPollingWork.eventKey("primary", "team/project", release)),
                 failure.retryKeys,
             )
-            assertEquals("refs/heads/main", requireNotNull(Queue.getInstance().items.single().getAction(CnbQueueAction::class.java)).ref)
+            assertEquals(
+                "refs/heads/main",
+                requireNotNull(
+                    Queue
+                        .getInstance()
+                        .items
+                        .single()
+                        .getAction(CnbQueueAction::class.java),
+                ).ref,
+            )
         } finally {
             Queue.QueueDecisionHandler.all().remove(veto)
             Queue.getInstance().items.forEach(Queue.getInstance()::cancel)
