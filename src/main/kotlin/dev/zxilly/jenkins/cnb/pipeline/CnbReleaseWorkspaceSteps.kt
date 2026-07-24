@@ -3,6 +3,7 @@ package dev.zxilly.jenkins.cnb.pipeline
 import dev.zxilly.jenkins.cnb.api.CnbClient
 import dev.zxilly.jenkins.cnb.api.CnbDownloadTarget
 import dev.zxilly.jenkins.cnb.api.CnbRepeatableInput
+import dev.zxilly.jenkins.cnb.api.model.CnbReleaseAsset
 import dev.zxilly.jenkins.cnb.api.model.CnbReleaseAssetUploadRequest
 import hudson.AbortException
 import hudson.Extension
@@ -176,10 +177,26 @@ internal object CnbReleaseWorkspaceTransfer {
             java.util.UUID
                 .randomUUID()
                 .toString(),
+        resumed: Boolean = false,
     ): Any {
         val snapshot = workspace.act(PrepareWorkspaceUploadSnapshot(request.workspacePath.value, transferId))
         var primaryFailure: Throwable? = null
         try {
+            if (resumed) {
+                when (inspectResumedUpload(request, context, client, snapshot)) {
+                    RemoteUploadState.MATCH -> {
+                        return uploadResult(request, snapshot.size)
+                    }
+
+                    RemoteUploadState.CONFLICT -> {
+                        if (!request.overwrite) {
+                            throw AbortException("CNB resumed upload found a different asset with the same name")
+                        }
+                    }
+
+                    RemoteUploadState.ABSENT -> {}
+                }
+            }
             val input = FixedSizeWorkspaceInput(workspace, snapshot)
             client.uploadReleaseAsset(
                 context.repository,
@@ -192,15 +209,7 @@ internal object CnbReleaseWorkspaceTransfer {
                 ),
                 input,
             )
-            return CnbReleasePipelineValues.mapOfValues(
-                "operation" to "uploaded",
-                "releaseId" to request.releaseId.value,
-                "assetName" to request.assetName.value,
-                "path" to request.workspacePath.value,
-                "size" to snapshot.size,
-                "overwrite" to request.overwrite,
-                "ttlDays" to request.ttl.days,
-            )
+            return uploadResult(request, snapshot.size)
         } catch (failure: Throwable) {
             primaryFailure = failure
             throw failure
@@ -209,11 +218,107 @@ internal object CnbReleaseWorkspaceTransfer {
         }
     }
 
+    private fun uploadResult(
+        request: CnbReleaseStepRequest.UploadAsset,
+        size: Long,
+    ): Any =
+        CnbReleasePipelineValues.mapOfValues(
+            "operation" to "uploaded",
+            "releaseId" to request.releaseId.value,
+            "assetName" to request.assetName.value,
+            "path" to request.workspacePath.value,
+            "size" to size,
+            "overwrite" to request.overwrite,
+            "ttlDays" to request.ttl.days,
+        )
+
+    private fun inspectResumedUpload(
+        request: CnbReleaseStepRequest.UploadAsset,
+        context: CnbRunContext,
+        client: CnbClient,
+        snapshot: WorkspaceUploadSnapshot,
+    ): RemoteUploadState {
+        val release = client.getRelease(context.repository, request.releaseId.value)
+        var matchingAsset: CnbReleaseAsset? = null
+        for (asset in release.assets) {
+            if (asset.name != request.assetName.value) continue
+            if (matchingAsset != null) return RemoteUploadState.CONFLICT
+            matchingAsset = asset
+        }
+        val asset = matchingAsset ?: return RemoteUploadState.ABSENT
+        if (asset.size != snapshot.size) return RemoteUploadState.CONFLICT
+
+        val normalizedAlgorithm = asset.hashAlgorithm.replace("-", "").lowercase()
+        if (normalizedAlgorithm == "sha256" && asset.hashValue.isNotBlank()) {
+            return if (asset.hashValue.equals(snapshot.sha256.toHex(), ignoreCase = true)) {
+                RemoteUploadState.MATCH
+            } else {
+                RemoteUploadState.CONFLICT
+            }
+        }
+
+        val target = DigestDownloadTarget()
+        val downloaded =
+            client.downloadReleaseAsset(
+                context.repository,
+                release.tagName,
+                asset.name,
+                target,
+                share = false,
+                maxBytes = maxOf(1L, snapshot.size),
+            ) ?: return RemoteUploadState.CONFLICT
+        return if (downloaded.contentLength == snapshot.size && target.matches(snapshot.sha256, snapshot.size)) {
+            RemoteUploadState.MATCH
+        } else {
+            RemoteUploadState.CONFLICT
+        }
+    }
+
+    private enum class RemoteUploadState {
+        ABSENT,
+        MATCH,
+        CONFLICT,
+    }
+
+    private class DigestDownloadTarget : CnbDownloadTarget {
+        private val digest = MessageDigest.getInstance("SHA-256")
+        private var opened = false
+        private var size = 0L
+
+        override fun openStream(): OutputStream {
+            check(!opened) { "CNB resumed upload comparison target was opened more than once" }
+            opened = true
+            return object : OutputStream() {
+                override fun write(value: Int) {
+                    digest.update(value.toByte())
+                    size++
+                }
+
+                override fun write(
+                    bytes: ByteArray,
+                    offset: Int,
+                    length: Int,
+                ) {
+                    digest.update(bytes, offset, length)
+                    size += length
+                }
+            }
+        }
+
+        fun matches(
+            expectedDigest: ByteArray,
+            expectedSize: Long,
+        ): Boolean = opened && size == expectedSize && MessageDigest.isEqual(expectedDigest, digest.digest())
+    }
+
+    private fun ByteArray.toHex(): String = joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+
     fun download(
         request: CnbReleaseStepRequest.DownloadAsset,
         context: CnbRunContext,
         client: CnbClient,
         workspace: FilePath,
+        resumed: Boolean = false,
     ): Any {
         val downloaded =
             downloadToWorkspace(
@@ -222,6 +327,7 @@ internal object CnbReleaseWorkspaceTransfer {
                 request.overwrite,
                 request.limit,
                 "CNB release asset was not found",
+                resumed,
             ) { target ->
                 client
                     .downloadReleaseAsset(
@@ -269,9 +375,10 @@ internal object CnbReleaseWorkspaceTransfer {
         overwrite: Boolean,
         limit: CnbReleaseTransferLimit,
         missingMessage: String,
+        resumed: Boolean = false,
         transfer: (CnbDownloadTarget) -> CnbWorkspaceDownloadMetadata?,
     ): CnbWorkspaceDownloadMetadata {
-        val prepared = workspace.act(PrepareWorkspaceDownload(path.value, overwrite))
+        val prepared = workspace.act(PrepareWorkspaceDownload(path.value, overwrite, resumed))
         try {
             val downloaded =
                 transfer(
@@ -294,6 +401,21 @@ internal object CnbReleaseWorkspaceTransfer {
             }
             if (actualSize < 0 || actualSize > limit.bytes) {
                 throw AbortException("CNB workspace download exceeded maxBytes")
+            }
+            if (prepared.destinationExisted && resumed && !overwrite) {
+                val matches =
+                    workspace.act(
+                        WorkspaceDownloadMatchesPublishedFile(
+                            path.value,
+                            prepared.temporaryName,
+                            prepared.fileKey,
+                        ),
+                    )
+                if (!matches) {
+                    throw IOException("CNB resumed download did not match the file already published in the workspace")
+                }
+                workspace.act(DeleteWorkspaceTemporary(path.value, prepared.temporaryName))
+                return downloaded.copy(contentLength = actualSize)
             }
             workspace.act(
                 AtomicWorkspaceMove(
@@ -428,6 +550,7 @@ internal object CnbReleaseWorkspaceTransfer {
     private data class PreparedWorkspaceDownload(
         val temporaryName: String,
         val fileKey: String?,
+        val destinationExisted: Boolean,
     ) : Serializable {
         companion object {
             private const val serialVersionUID = 1L
@@ -547,6 +670,7 @@ internal object CnbReleaseWorkspaceTransfer {
     private class PrepareWorkspaceDownload(
         private val relativePath: String,
         private val overwrite: Boolean,
+        private val resumed: Boolean,
     ) : MasterToSlaveFileCallable<PreparedWorkspaceDownload>() {
         override fun invoke(
             workspace: File,
@@ -555,9 +679,10 @@ internal object CnbReleaseWorkspaceTransfer {
             val validated = validatedPath(relativePath)
             val root = validatedWorkspaceRoot(workspace, create = true)
             val destination = resolveTrustedFile(root, validated, createParents = true)
-            if (Files.exists(destination, LinkOption.NOFOLLOW_LINKS)) {
+            val destinationExisted = Files.exists(destination, LinkOption.NOFOLLOW_LINKS)
+            if (destinationExisted) {
                 requireRegularNonLink(destination, "CNB release asset destination")
-                if (!overwrite) {
+                if (!overwrite && !resumed) {
                     throw FileAlreadyExistsException(
                         destination.toString(),
                         null,
@@ -571,7 +696,7 @@ internal object CnbReleaseWorkspaceTransfer {
             val temporaryName =
                 temporary.fileName?.toString()
                     ?: throw IOException("CNB release asset temporary file has no file name")
-            return PreparedWorkspaceDownload(temporaryName, identity.fileKey)
+            return PreparedWorkspaceDownload(temporaryName, identity.fileKey, destinationExisted)
         }
 
         companion object {
@@ -646,6 +771,33 @@ internal object CnbReleaseWorkspaceTransfer {
             }
             Files.delete(temporary)
             return true
+        }
+
+        companion object {
+            private const val serialVersionUID = 1L
+        }
+    }
+
+    private class WorkspaceDownloadMatchesPublishedFile(
+        private val relativePath: String,
+        private val temporaryName: String,
+        private val expectedFileKey: String?,
+    ) : MasterToSlaveFileCallable<Boolean>() {
+        override fun invoke(
+            workspace: File,
+            channel: VirtualChannel,
+        ): Boolean {
+            val validated = validatedPath(relativePath)
+            val root = validatedWorkspaceRoot(workspace, create = false)
+            val destination = resolveTrustedFile(root, validated, createParents = false)
+            val temporary = resolveTemporary(workspace, relativePath, temporaryName)
+            val destinationIdentity = regularFileIdentity(destination, "CNB release asset destination")
+            val temporaryIdentity = regularFileIdentity(temporary, "CNB release asset temporary file")
+            verifyFileKey(temporaryIdentity, expectedFileKey)
+            if (destinationIdentity.size != temporaryIdentity.size) return false
+            val destinationDigest = digestRegularFile(destination, CnbReleaseTransferLimit.MAX_BYTES)
+            val temporaryDigest = digestRegularFile(temporary, CnbReleaseTransferLimit.MAX_BYTES)
+            return MessageDigest.isEqual(destinationDigest, temporaryDigest)
         }
 
         companion object {

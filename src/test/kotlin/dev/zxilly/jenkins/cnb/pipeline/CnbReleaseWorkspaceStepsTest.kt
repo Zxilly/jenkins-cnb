@@ -4,6 +4,8 @@ import dev.zxilly.jenkins.cnb.api.CnbClient
 import dev.zxilly.jenkins.cnb.api.CnbDownloadTarget
 import dev.zxilly.jenkins.cnb.api.CnbRepeatableInput
 import dev.zxilly.jenkins.cnb.api.model.CnbApiCapabilities
+import dev.zxilly.jenkins.cnb.api.model.CnbRelease
+import dev.zxilly.jenkins.cnb.api.model.CnbReleaseAsset
 import dev.zxilly.jenkins.cnb.api.model.CnbReleaseAssetDownload
 import dev.zxilly.jenkins.cnb.api.model.CnbReleaseAssetUploadRequest
 import hudson.AbortException
@@ -23,6 +25,7 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
 import java.util.ArrayList
 import java.util.LinkedHashMap
 
@@ -102,6 +105,54 @@ class CnbReleaseWorkspaceStepsTest {
                 files.anyMatch { it.fileName.toString().startsWith(".cnb-upload-") }
             },
         )
+    }
+
+    @Test
+    fun `resumed upload converges when CNB already has the immutable snapshot`() {
+        val workspacePath = temporaryDirectory.resolve("resumed-upload")
+        Files.createDirectories(workspacePath)
+        Files.writeString(workspacePath.resolve("plugin.hpi"), "plugin")
+        var uploads = 0
+        val digest = MessageDigest.getInstance("SHA-256").digest("plugin".toByteArray()).toHex()
+        val client =
+            client(
+                mapOf(
+                    "getRelease" to {
+                        CnbRelease(
+                            id = "release-1",
+                            tagName = "v1.0.0",
+                            assets =
+                                listOf(
+                                    CnbReleaseAsset(
+                                        id = "asset-1",
+                                        name = "plugin.hpi",
+                                        path = "plugin.hpi",
+                                        size = 6,
+                                        hashAlgorithm = "sha256",
+                                        hashValue = digest,
+                                    ),
+                                ),
+                        )
+                    },
+                    "uploadReleaseAsset" to {
+                        uploads++
+                        Unit
+                    },
+                ),
+            )
+
+        val result =
+            CnbReleaseWorkspaceTransfer.upload(
+                uploadRequest("plugin.hpi"),
+                context,
+                client,
+                FilePath(workspacePath.toFile()),
+                "12345678-1234-1234-1234-123456789abc",
+                resumed = true,
+            ) as Map<*, *>
+
+        assertEquals("uploaded", result["operation"])
+        assertEquals(0, uploads)
     }
 
     @Test
@@ -207,6 +258,49 @@ class CnbReleaseWorkspaceStepsTest {
         )
         assertEquals("new", Files.readString(destination))
         assertEquals(1, calls)
+    }
+
+    @Test
+    fun `resumed download converges only when the published file matches`() {
+        val workspacePath = temporaryDirectory.resolve("resumed-download")
+        Files.createDirectories(workspacePath)
+        val destination = workspacePath.resolve("plugin.hpi")
+        Files.writeString(destination, "release-asset")
+        val matching =
+            downloadClient { _, target ->
+                target.openStream().use { it.write("release-asset".toByteArray()) }
+                CnbReleaseAssetDownload(13, "application/octet-stream", "etag-1")
+            }
+
+        val result =
+            CnbReleaseWorkspaceTransfer.download(
+                downloadRequest("plugin.hpi"),
+                context,
+                matching,
+                FilePath(workspacePath.toFile()),
+                resumed = true,
+            ) as Map<*, *>
+
+        assertEquals("downloaded", result["operation"])
+        assertEquals("release-asset", Files.readString(destination))
+        assertTrue(downloadTemporaries(workspacePath).isEmpty())
+
+        val different =
+            downloadClient { _, target ->
+                target.openStream().use { it.write("other-content".toByteArray()) }
+                CnbReleaseAssetDownload(13, "application/octet-stream", "etag-2")
+            }
+        assertThrows(IOException::class.java) {
+            CnbReleaseWorkspaceTransfer.download(
+                downloadRequest("plugin.hpi"),
+                context,
+                different,
+                FilePath(workspacePath.toFile()),
+                resumed = true,
+            )
+        }
+        assertEquals("release-asset", Files.readString(destination))
+        assertTrue(downloadTemporaries(workspacePath).isEmpty())
     }
 
     @Test
@@ -425,6 +519,8 @@ class CnbReleaseWorkspaceStepsTest {
             else -> throw AssertionError("Pipeline result contains non-CPS-safe ${value.javaClass.name}")
         }
     }
+
+    private fun ByteArray.toHex(): String = joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
     @Suppress("UNCHECKED_CAST")
     private fun client(handlers: Map<String, (Array<out Any?>?) -> Any?>): CnbClient =

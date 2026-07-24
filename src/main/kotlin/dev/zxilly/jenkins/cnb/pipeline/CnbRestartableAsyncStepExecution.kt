@@ -8,9 +8,11 @@ import jenkins.model.Jenkins
 import org.jenkinsci.plugins.workflow.steps.StepContext
 import org.jenkinsci.plugins.workflow.steps.StepExecution
 import java.io.IOException
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.Executor
 import java.util.concurrent.Future
+import java.util.concurrent.FutureTask
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 
 /**
@@ -23,6 +25,7 @@ import java.util.concurrent.TimeUnit
 internal abstract class CnbRestartableAsyncStepExecution<T>(
     context: StepContext,
     private val operationName: String,
+    executor: Executor = EXECUTOR,
 ) : StepExecution(context) {
     @Volatile
     @Transient
@@ -35,6 +38,9 @@ internal abstract class CnbRestartableAsyncStepExecution<T>(
     @Volatile
     @Transient
     private var stopCause: Throwable? = null
+
+    @Transient
+    private var executor: Executor? = executor
 
     private var phase: Phase = Phase.READY
     private var attempt: Int = 0
@@ -96,30 +102,42 @@ internal abstract class CnbRestartableAsyncStepExecution<T>(
 
     private fun schedule(resumed: Boolean) {
         val authentication = Jenkins.getAuthentication2()
-        val scheduledAttempt =
-            synchronized(this) {
-                val existing = task
-                if (existing != null && !existing.isDone) return
-                if (phase == Phase.SUCCEEDED || phase == Phase.FAILED || phase == Phase.STOPPED) return
-                phase = Phase.RUNNING
-                attempt++
-                attempt
-            }
-        task =
-            EXECUTOR.submit {
-                threadName = Thread.currentThread().name
-                try {
-                    ACL.as2(authentication).use {
-                        val value = runAttempt(scheduledAttempt, resumed)
-                        completeSuccessfully(value)
+        lateinit var scheduledTask: FutureTask<Unit>
+        synchronized(this) {
+            val existing = task
+            if (existing != null && !existing.isDone) return
+            if (phase == Phase.SUCCEEDED || phase == Phase.FAILED || phase == Phase.STOPPED) return
+            phase = Phase.RUNNING
+            attempt++
+            val scheduledAttempt = attempt
+            scheduledTask =
+                FutureTask {
+                    threadName = Thread.currentThread().name
+                    try {
+                        ACL.as2(authentication).use {
+                            val value = runAttempt(scheduledAttempt, resumed)
+                            completeSuccessfully(value)
+                        }
+                    } catch (failure: Throwable) {
+                        if (failure is InterruptedException) Thread.currentThread().interrupt()
+                        completeExceptionally(failure)
+                    } finally {
+                        threadName = null
                     }
-                } catch (failure: Throwable) {
-                    if (failure is InterruptedException) Thread.currentThread().interrupt()
-                    completeExceptionally(failure)
-                } finally {
-                    threadName = null
+                }
+            task = scheduledTask
+        }
+        try {
+            (executor ?: EXECUTOR.also { executor = it }).execute(scheduledTask)
+        } catch (failure: RuntimeException) {
+            synchronized(this) {
+                if (task === scheduledTask) {
+                    task = null
+                    if (phase != Phase.STOPPED) phase = Phase.FAILED
                 }
             }
+            throw IOException("Could not schedule $operationName", failure)
+        }
     }
 
     private fun completeSuccessfully(value: T) {
@@ -168,12 +186,20 @@ internal abstract class CnbRestartableAsyncStepExecution<T>(
         private const val serialVersionUID = 1L
         private const val CHECKPOINT_TIMEOUT_SECONDS = 30L
         private val NOT_COMPLETED = Any()
-        private val EXECUTOR: ExecutorService =
-            Executors.newCachedThreadPool(
-                NamingThreadFactory(
-                    ClassLoaderSanityThreadFactory(DaemonThreadFactory()),
-                    CnbRestartableAsyncStepExecution::class.java.name,
-                ),
-            )
+        private val EXECUTOR: ThreadPoolExecutor = newCnbTransferExecutor()
     }
 }
+
+internal fun newCnbTransferExecutor(): ThreadPoolExecutor =
+    ThreadPoolExecutor(
+        4,
+        4,
+        60L,
+        TimeUnit.SECONDS,
+        ArrayBlockingQueue(64),
+        NamingThreadFactory(
+            ClassLoaderSanityThreadFactory(DaemonThreadFactory()),
+            CnbRestartableAsyncStepExecution::class.java.name,
+        ),
+        ThreadPoolExecutor.AbortPolicy(),
+    ).apply { allowCoreThreadTimeOut(true) }

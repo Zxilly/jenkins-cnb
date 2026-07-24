@@ -9,11 +9,29 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executor
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 class CnbTransferExecutionContractTest {
+    @Test
+    fun `workspace transfer executor has bounded workers and backlog`() {
+        val executor = newCnbTransferExecutor()
+        try {
+            assertEquals(4, executor.corePoolSize)
+            assertEquals(4, executor.maximumPoolSize)
+            assertTrue(executor.queue is ArrayBlockingQueue<*>)
+            assertEquals(64, executor.queue.remainingCapacity())
+            assertTrue(executor.rejectedExecutionHandler is ThreadPoolExecutor.AbortPolicy)
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
     @Test
     fun `workspace transfer steps never block a safe controller restart`() {
         val context = RecordingStepContext()
@@ -50,6 +68,30 @@ class CnbTransferExecutionContractTest {
         assertEquals(1, context.checkpoints.get())
         assertEquals("completed", context.value)
         assertFalse(execution.blocksRestart())
+    }
+
+    @Test
+    fun `stopping a queued transfer prevents its remote attempt`() {
+        val context = RecordingStepContext()
+        val queued = AtomicReference<Runnable>()
+        val attempts = AtomicInteger()
+        val execution =
+            object : CnbRestartableAsyncStepExecution<String>(context, "test transfer", Executor(queued::set)) {
+                override fun runAttempt(
+                    attempt: Int,
+                    resumed: Boolean,
+                ): String {
+                    attempts.incrementAndGet()
+                    return "completed"
+                }
+            }
+
+        assertFalse(execution.start())
+        execution.stop(InterruptedException("cancelled"))
+        queued.get().run()
+
+        assertEquals(0, attempts.get())
+        assertTrue(context.value is InterruptedException)
     }
 
     private class RecordingStepContext : StepContext() {

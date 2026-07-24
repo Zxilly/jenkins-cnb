@@ -177,7 +177,7 @@ private class CnbBuildDetailTransferExecution(
         val resolved = CnbRunContextResolver.resolve(run, listener, supplied, environment)
         val workspace = context.get(FilePath::class.java)
         return resolved.client(run).use { client ->
-            CnbBuildDetailDispatcher.execute(request, resolved, client, workspace)
+            CnbBuildDetailDispatcher.execute(request, resolved, client, workspace, resumed)
         }
     }
 
@@ -192,6 +192,7 @@ internal object CnbBuildDetailDispatcher {
         context: CnbRunContext,
         client: CnbClient,
         workspace: FilePath? = null,
+        resumed: Boolean = false,
     ): Any =
         when (request) {
             is CnbBuildDetailRequest.Stage -> {
@@ -215,6 +216,7 @@ internal object CnbBuildDetailDispatcher {
                         request.overwrite,
                         request.limit,
                         "CNB build runner log was not found",
+                        resumed,
                     ) { target ->
                         client
                             .downloadBuildRunnerLog(
