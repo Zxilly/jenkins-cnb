@@ -5,6 +5,7 @@ import com.sun.net.httpserver.HttpServer
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryEvent
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryEventPayload
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryEventType
+import dev.zxilly.jenkins.cnb.api.model.CnbCommit
 import dev.zxilly.jenkins.cnb.config.CnbGlobalConfiguration
 import dev.zxilly.jenkins.cnb.config.CnbServer
 import dev.zxilly.jenkins.cnb.health.CnbHealthComponent
@@ -13,6 +14,8 @@ import dev.zxilly.jenkins.cnb.scm.CnbSCMSource
 import hudson.model.Action
 import hudson.model.Queue
 import hudson.model.TaskListener
+import hudson.plugins.git.GitSCM
+import hudson.plugins.git.RevisionParameterAction
 import hudson.util.StreamTaskListener
 import jenkins.branch.BranchSource
 import org.jenkinsci.plugins.workflow.multibranch.WorkflowMultiBranchProject
@@ -32,10 +35,95 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 @WithJenkins
 class CnbRepositoryEventPollingWorkIntegrationTest {
+    @Test
+    fun `polling converges with the latest webhook revision but permits A to B to A`(jenkins: JenkinsRule) {
+        val project = jenkins.createFreeStyleProject("cross-channel-history")
+        val trigger = CnbPushTrigger("primary", "team/project", "main").apply { setCiSkip(false) }
+        val shaA = "a".repeat(40)
+        val shaB = "b".repeat(40)
+        fun identity(sha: String) = CnbQueueIdentity("primary", "team/project", "refs/heads/main", sha)
+        fun event(id: String, sha: String) =
+            repositoryEvent("team/project", id).copy(payload = CnbRepositoryEventPayload(ref = "refs/heads/main", head = sha))
+
+        jenkins.assertBuildStatusSuccess(
+            project.scheduleBuild2(0, CnbQueueAction(identity(shaA), "webhook-a")),
+        )
+        CnbPushTriggerRecovery.recover("primary", "team/project", listOf(event("poll-a-duplicate", shaA)), project, trigger)
+        jenkins.waitUntilNoActivity()
+        assertEquals(1, project.builds.count())
+
+        jenkins.assertBuildStatusSuccess(
+            project.scheduleBuild2(0, CnbQueueAction(identity(shaB), "webhook-b")),
+        )
+        CnbPushTriggerRecovery.recover("primary", "team/project", listOf(event("poll-a-return", shaA)), project, trigger)
+        jenkins.waitUntilNoActivity()
+
+        assertEquals(3, project.builds.count())
+        assertEquals(shaA, requireNotNull(requireNotNull(project.lastBuild).getAction(CnbQueueAction::class.java)).sha)
+    }
+
+    @Test
+    fun `classic polling recovery honors CI skip and pins a matching GitSCM revision`(jenkins: JenkinsRule) {
+        jenkins.jenkins.numExecutors = 0
+        val project = jenkins.createFreeStyleProject("classic-policy-recovery")
+        project.scm = GitSCM("https://cnb.cool/team/project.git")
+        val trigger = CnbPushTrigger("primary", "team/project", "main")
+        val event = repositoryEvent("team/project", "policy-event")
+
+        CnbPushTriggerRecovery.recover(
+            "primary",
+            "team/project",
+            listOf(event),
+            project,
+            trigger,
+            getCommit = { _, sha -> CnbCommit(sha, "do not recover [skip ci]") },
+            loadSourceCloneUrl = { "https://cnb.cool/team/project" },
+        )
+        assertTrue(Queue.getInstance().items.isEmpty())
+
+        CnbPushTriggerRecovery.recover(
+            "primary",
+            "team/project",
+            listOf(event),
+            project,
+            trigger,
+            getCommit = { _, sha -> CnbCommit(sha, "recover this revision") },
+            loadSourceCloneUrl = { "https://cnb.cool/team/other" },
+        )
+        assertTrue(Queue.getInstance().items.isEmpty(), "A GitSCM job must not run without a trusted revision action")
+
+        CnbPushTriggerRecovery.recover(
+            "primary",
+            "team/project",
+            listOf(event),
+            project,
+            trigger,
+            getCommit = { _, sha -> CnbCommit(sha, "recover this revision") },
+            loadSourceCloneUrl = {
+                val executor = Executors.newSingleThreadExecutor()
+                try {
+                    executor
+                        .submit { Queue.withLock(Runnable {}) }
+                        .get(5, TimeUnit.SECONDS)
+                    "https://cnb.cool/team/project"
+                } finally {
+                    executor.shutdownNow()
+                }
+            },
+        )
+
+        val queued = Queue.getInstance().items.single()
+        assertEquals(COMMIT, requireNotNull(queued.getAction(RevisionParameterAction::class.java)).commit)
+        assertEquals(COMMIT, requireNotNull(queued.getAction(CnbQueueAction::class.java)).sha)
+        Queue.getInstance().cancel(queued)
+    }
+
     @Test
     fun `queue refusal leaves a recovered event available for retry`(jenkins: JenkinsRule) {
         val api = startApi { exchange -> respond(exchange, 200, pushEvents("team/project", "retry-event")) }
@@ -49,7 +137,7 @@ class CnbRepositoryEventPollingWorkIntegrationTest {
         try {
             configureServer(api)
             val project = jenkins.createFreeStyleProject("classic-retry")
-            project.addTrigger(CnbPushTrigger("primary", "team/project", "main"))
+            project.addTrigger(CnbPushTrigger("primary", "team/project", "main").apply { setCiSkip(false) })
             Queue.QueueDecisionHandler.all().add(veto)
 
             CnbRepositoryEventPollingWork(CnbOperationalHealth()).runOnce(TaskListener.NULL)
@@ -81,7 +169,7 @@ class CnbRepositoryEventPollingWorkIntegrationTest {
         try {
             configureServer(api)
             val project = jenkins.createFreeStyleProject("classic-polling")
-            project.addTrigger(CnbPushTrigger("primary", "team/project", "main"))
+            project.addTrigger(CnbPushTrigger("primary", "team/project", "main").apply { setCiSkip(false) })
             val work = CnbRepositoryEventPollingWork(CnbOperationalHealth())
 
             assertEquals(60_000L, work.getRecurrencePeriod())
@@ -164,9 +252,9 @@ class CnbRepositoryEventPollingWorkIntegrationTest {
         try {
             configureServer(api)
             val broken = jenkins.createFreeStyleProject("broken-polling")
-            broken.addTrigger(CnbPushTrigger("primary", "team/broken", "main"))
+            broken.addTrigger(CnbPushTrigger("primary", "team/broken", "main").apply { setCiSkip(false) })
             val healthy = jenkins.createFreeStyleProject("healthy-polling")
-            healthy.addTrigger(CnbPushTrigger("primary", "team/healthy", "main"))
+            healthy.addTrigger(CnbPushTrigger("primary", "team/healthy", "main").apply { setCiSkip(false) })
             val output = ByteArrayOutputStream()
             val listener = StreamTaskListener(output, StandardCharsets.UTF_8)
 

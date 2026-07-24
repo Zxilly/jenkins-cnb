@@ -318,7 +318,7 @@ class CnbPushTrigger
                             target,
                             0,
                             CauseAction(CnbPushCause.from(delivery)),
-                            CnbQueueAction(queueIdentity),
+                            CnbQueueAction(queueIdentity, delivery.payload.deliveryId, CnbDeliveryScope.DIRECT),
                         ) != null
                 },
             )

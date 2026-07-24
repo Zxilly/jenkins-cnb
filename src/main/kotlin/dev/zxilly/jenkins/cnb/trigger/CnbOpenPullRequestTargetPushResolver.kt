@@ -17,7 +17,6 @@ import java.util.Locale
 internal data class CnbVerifiedOpenPullRequestPush(
     val delivery: CnbWebhookDelivery,
     val snapshot: CnbLiveDeliverySnapshot,
-    val sourceCloneUrl: String,
 )
 
 /**
@@ -68,11 +67,6 @@ internal object CnbOpenPullRequestTargetPushResolver {
             }
             val sourceSha = CnbGitObjectId.canonical(current.sourceSha)
             val normalized = current.copy(sourceSha = sourceSha, targetSha = targetSha, mergeSha = null)
-            val sourceRepository = missingOrUnauthorized { client.getRepository(normalized.sourceRepo) } ?: continue
-            if (sourceRepository.path != normalized.sourceRepo || !sourceRepository.cloneable || sourceRepository.cloneUrl.isBlank()) {
-                continue
-            }
-            val sourceCloneUrl = secureCloneUrl(sourceRepository.cloneUrl, normalized.sourceRepo, payload.instance.webUrl)
 
             val labels =
                 if (requirements.labels) {
@@ -116,7 +110,6 @@ internal object CnbOpenPullRequestTargetPushResolver {
                             labels = labels,
                             commitMessage = commitMessage,
                         ),
-                    sourceCloneUrl = sourceCloneUrl,
                 )
         }
         return result
@@ -180,7 +173,7 @@ internal object CnbOpenPullRequestTargetPushResolver {
         CnbGitObjectId.isPresent(actual) &&
             CnbGitObjectId.canonical(actual) == CnbGitObjectId.canonical(expected)
 
-    private fun secureCloneUrl(
+    internal fun secureCloneUrl(
         value: String,
         repositoryPath: String,
         webOrigin: String,

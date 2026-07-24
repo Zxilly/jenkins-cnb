@@ -2,6 +2,7 @@ package dev.zxilly.jenkins.cnb.trigger
 
 import dev.zxilly.jenkins.cnb.api.CnbApiException
 import dev.zxilly.jenkins.cnb.api.CnbClientFactory
+import dev.zxilly.jenkins.cnb.api.model.CnbCommit
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryEvent
 import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryRefType
 import dev.zxilly.jenkins.cnb.config.CnbGlobalConfiguration
@@ -10,6 +11,7 @@ import dev.zxilly.jenkins.cnb.scm.CnbSCMSource
 import dev.zxilly.jenkins.cnb.webhook.CnbWebhookEvent
 import hudson.Extension
 import hudson.model.AsyncPeriodicWork
+import hudson.model.Action
 import hudson.model.Cause
 import hudson.model.CauseAction
 import hudson.model.Item
@@ -143,6 +145,8 @@ class CnbRepositoryEventPollingWork
 
         private fun watchedRepositories(dueServerIds: Set<String>): List<CnbWatchedRepository> {
             val watches = ArrayList<CnbRepositoryEventWatch>()
+            val commitCache = HashMap<Triple<String, String, String>, CnbCommit?>()
+            val cloneUrlCache = HashMap<Pair<String, String>, String?>()
             for (owner in SCMSourceOwners.all()) {
                 for (source in owner.scmSources) {
                     val cnb = source as? CnbSCMSource ?: continue
@@ -203,6 +207,26 @@ class CnbRepositoryEventPollingWork
                                     events,
                                     candidate,
                                     trigger,
+                                    getCommit = { repository, commit ->
+                                        val key = Triple(serverId, repository, commit.lowercase(Locale.ROOT))
+                                        if (commitCache.containsKey(key)) {
+                                            commitCache[key]
+                                        } else {
+                                            CnbPushTriggerRecovery
+                                                .verifiedCommit(serverId, repository, commit)
+                                                .also { commitCache[key] = it }
+                                        }
+                                    },
+                                    loadSourceCloneUrl = {
+                                        val key = serverId to repositoryPath
+                                        if (cloneUrlCache.containsKey(key)) {
+                                            cloneUrlCache[key]
+                                        } else {
+                                            CnbPushTriggerRecovery
+                                                .verifiedCloneUrl(serverId, repositoryPath)
+                                                .also { cloneUrlCache[key] = it }
+                                        }
+                                    },
                                 )
                             },
                         credentialCandidates = listOf(CnbRepositoryEventCredentialCandidate.server()),
@@ -679,6 +703,12 @@ internal object CnbRepositoryEventClassifier {
         }
     }
 
+    fun isPushDeletion(event: CnbRepositoryEvent): Boolean {
+        if (!event.type.wireValue.equals("PushEvent", ignoreCase = true)) return false
+        val head = event.payload.head.trim()
+        return head.length in GIT_OBJECT_ID_LENGTHS && head.all { it == '0' }
+    }
+
     private val CODE_REF_TYPES = setOf(CnbRepositoryRefType.BRANCH, CnbRepositoryRefType.TAG)
     private val GIT_OBJECT_ID_LENGTHS = setOf(40, 64)
 }
@@ -740,11 +770,21 @@ internal object CnbRepositoryEventHourProcessor {
         }
         if (unseenEvents.isEmpty()) return 0
 
-        dispatch(unseenEvents)
+        try {
+            dispatch(unseenEvents)
+        } catch (failure: CnbPartialRepositoryEventDispatchException) {
+            mark(unseenKeys - failure.retryKeys)
+            throw failure
+        }
         mark(unseenKeys)
         return unseenEvents.size
     }
 }
+
+internal class CnbPartialRepositoryEventDispatchException(
+    val retryKeys: Set<String>,
+    cause: RuntimeException,
+) : RuntimeException("CNB repository event dispatch partially failed", cause)
 
 /**
  * Dispatches and durably deduplicates a recovered batch independently for every authorized
@@ -806,27 +846,35 @@ internal object CnbPushTriggerRecovery {
         events: List<CnbRepositoryEvent>,
         candidate: Job<*, *>,
         trigger: CnbPushTrigger,
+        getCommit: (String, String) -> CnbCommit? = { repository, commit ->
+            verifiedCommit(serverId, repository, commit)
+        },
+        loadSourceCloneUrl: () -> String? = { verifiedCloneUrl(serverId, repositoryPath) },
     ) {
         data class RecoveredPush(
             val event: CnbRepositoryEvent,
             val ref: String,
-            val commit: String,
+            val commit: String?,
             val kind: CnbRepositoryEventClassifier.RefKind,
         )
 
-        val pushesByRef = linkedMapOf<String, RecoveredPush>()
+        val pushesByRef = linkedMapOf<String, MutableList<RecoveredPush>>()
         events.forEach { event ->
             val ref = CnbRepositoryEventClassifier.pushRef(event) ?: return@forEach
-            val commit = CnbRepositoryEventClassifier.pushCommit(event) ?: return@forEach
             val kind = CnbRepositoryEventClassifier.pushRefKind(event) ?: return@forEach
+            val commit = CnbRepositoryEventClassifier.pushCommit(event)
+            if (commit == null && !CnbRepositoryEventClassifier.isPushDeletion(event)) return@forEach
             val qualifiedRef = if (kind == CnbRepositoryEventClassifier.RefKind.TAG) "refs/tags/$ref" else "refs/heads/$ref"
-            pushesByRef[qualifiedRef] = RecoveredPush(event, ref, commit, kind)
+            pushesByRef.getOrPut(qualifiedRef) { ArrayList() } += RecoveredPush(event, ref, commit, kind)
         }
         if (pushesByRef.isEmpty()) return
         if (!candidate.isBuildable) return
 
         var schedulingFailure: RuntimeException? = null
-        for ((qualifiedRef, push) in pushesByRef) {
+        val retryKeys = linkedSetOf<String>()
+        for ((qualifiedRef, recovered) in pushesByRef) {
+            val push = recovered.last()
+            val pushCommit = push.commit ?: continue
             val event = if (push.kind == CnbRepositoryEventClassifier.RefKind.TAG) CnbWebhookEvent.TAG_PUSH else CnbWebhookEvent.PUSH
             if (!CnbEventFilter.matches(trigger.getEventFilter(), event)) continue
             val matches =
@@ -838,27 +886,56 @@ internal object CnbPushTriggerRecovery {
                 }
             if (!matches) continue
             try {
-                val identity = CnbQueueIdentity(serverId, repositoryPath, qualifiedRef, push.commit.lowercase(Locale.ROOT))
-                val queueTask = if (trigger.isCancelPendingBuildsOnUpdate()) candidate as? Queue.Task ?: continue else null
-                ParameterizedJobMixIn.scheduleBuild2(
-                    candidate,
-                    0,
-                    CauseAction(
-                        CnbRepositoryEventCause(
-                            serverId,
-                            repositoryPath,
-                            push.event,
-                            push.ref,
-                            push.commit,
-                            tag = push.kind == CnbRepositoryEventClassifier.RefKind.TAG,
-                        ),
-                    ),
-                    CnbQueueAction(identity),
-                ) ?: throw IllegalStateException("Jenkins refused the recovered CNB event build")
-                if (queueTask != null) {
-                    CnbPendingBuilds.cancelSuperseded(Queue.getInstance(), queueTask, identity)
+                val identity = CnbQueueIdentity(serverId, repositoryPath, qualifiedRef, pushCommit.lowercase(Locale.ROOT))
+                if (trigger.isCiSkip()) {
+                    val commit = getCommit(repositoryPath, identity.sha) ?: continue
+                    if (!commit.sha.equals(identity.sha, ignoreCase = true) || CnbCiSkip.matches(commit.message)) continue
+                }
+                val requiresCheckout = CnbClassicGitRevisionAction.supports(candidate)
+                val checkoutAction =
+                    if (requiresCheckout) {
+                        loadSourceCloneUrl()
+                            ?.let { CnbClassicGitRevisionAction.create(candidate, identity.sha, it) }
+                            ?: continue
+                    } else {
+                        null
+                    }
+                val historyQuery =
+                    CnbDeliveryHistory.Query(
+                        job = candidate,
+                        incoming = identity,
+                        deliveryId = null,
+                        deliveryScope = null,
+                        deduplicateRevision = true,
+                    )
+                CnbDeliveryHistory.withStableQueue(listOf(historyQuery)) { queue, histories ->
+                    if (CnbDeliveryHistory.contains(queue, histories.single())) return@withStableQueue
+                    val actions =
+                        arrayListOf<Action>(
+                            CauseAction(
+                                CnbRepositoryEventCause(
+                                    serverId,
+                                    repositoryPath,
+                                    push.event,
+                                    push.ref,
+                                    pushCommit,
+                                    tag = push.kind == CnbRepositoryEventClassifier.RefKind.TAG,
+                                ),
+                            ),
+                            CnbQueueAction(identity),
+                        )
+                    checkoutAction?.let(actions::add)
+                    ParameterizedJobMixIn.scheduleBuild2(candidate, 0, *actions.toTypedArray())
+                        ?: throw IllegalStateException("Jenkins refused the recovered CNB event build")
+                    if (trigger.isCancelPendingBuildsOnUpdate()) {
+                        val queueTask = candidate as? Queue.Task ?: return@withStableQueue
+                        CnbPendingBuilds.cancelSuperseded(queue, queueTask, identity)
+                    }
                 }
             } catch (failure: RuntimeException) {
+                for (attempt in recovered) {
+                    retryKeys += CnbRepositoryEventPollingWork.eventKey(serverId, repositoryPath, attempt.event)
+                }
                 schedulingFailure =
                     combineFailure(
                         schedulingFailure,
@@ -867,10 +944,39 @@ internal object CnbPushTriggerRecovery {
                     )
             }
         }
-        schedulingFailure?.let { throw it }
+        schedulingFailure?.let { throw CnbPartialRepositoryEventDispatchException(retryKeys, it) }
+    }
+
+    internal fun verifiedCommit(
+        serverId: String,
+        repositoryPath: String,
+        commit: String,
+    ): CnbCommit? =
+        try {
+            CnbClientFactory.create(serverId).use { client -> client.getCommit(repositoryPath, commit) }
+        } catch (failure: CnbApiException) {
+            if (failure.statusCode !in MISSING_OR_UNAUTHORIZED_STATUS_CODES) throw failure
+            null
+        }
+
+    internal fun verifiedCloneUrl(
+        serverId: String,
+        repositoryPath: String,
+    ): String? {
+        val server = CnbGlobalConfiguration.get().getServers().firstOrNull { it.id == serverId } ?: return null
+        val repository =
+            try {
+                CnbClientFactory.create(serverId).use { client -> client.getRepository(repositoryPath) }
+            } catch (failure: CnbApiException) {
+                if (failure.statusCode !in MISSING_OR_UNAUTHORIZED_STATUS_CODES) throw failure
+                return null
+            }
+        if (repository.path != repositoryPath || !repository.cloneable || repository.cloneUrl.isBlank()) return null
+        return CnbOpenPullRequestTargetPushResolver.secureCloneUrl(repository.cloneUrl, repositoryPath, server.webUrl)
     }
 
     private val LOGGER = Logger.getLogger(CnbPushTriggerRecovery::class.java.name)
+    private val MISSING_OR_UNAUTHORIZED_STATUS_CODES = setOf(401, 403, 404)
 }
 
 internal class CnbRepositoryEventCause(

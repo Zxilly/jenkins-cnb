@@ -8,9 +8,6 @@ import dev.zxilly.jenkins.cnb.api.model.CnbCommit
 import dev.zxilly.jenkins.cnb.api.model.CnbLabel
 import dev.zxilly.jenkins.cnb.api.model.CnbPullRequest
 import dev.zxilly.jenkins.cnb.api.model.CnbPullRequestState
-import dev.zxilly.jenkins.cnb.api.model.CnbRepository
-import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryStatus
-import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryVisibility
 import dev.zxilly.jenkins.cnb.webhook.CnbWebhookActor
 import dev.zxilly.jenkins.cnb.webhook.CnbWebhookDelivery
 import dev.zxilly.jenkins.cnb.webhook.CnbWebhookEvent
@@ -78,7 +75,6 @@ class CnbOpenPullRequestTargetPushResolverTest {
                     ?.targetSha
             },
         )
-        assertEquals(listOf("https://cnb.cool/team/project.git", "https://cnb.cool/alice/project.git"), resolved.map { it.sourceCloneUrl })
         assertEquals(setOf("ready"), resolved.first().snapshot.labels)
         assertEquals(emptySet<String>(), resolved.last().snapshot.labels)
         assertEquals(listOf("origin change", "fork change"), resolved.map { it.snapshot.commitMessage })
@@ -88,6 +84,7 @@ class CnbOpenPullRequestTargetPushResolverTest {
         )
         assertEquals(1, calls.count { it == "listPullRequests:team/project" })
         assertEquals(0, calls.count { it == "getPullRequest:9" })
+        assertEquals(0, calls.count { it.startsWith("getRepository:") })
     }
 
     @Test
@@ -172,29 +169,12 @@ class CnbOpenPullRequestTargetPushResolverTest {
 
     @Test
     fun `rejects a source clone URL outside the signed CNB web origin`() {
-        val pullRequest = pullRequest("7", "alice/project", "feature/fork", SHA_A)
-        val delegate =
-            client(
-                listed = listOf(pullRequest),
-                details = mapOf("7" to pullRequest),
-                branches =
-                    mapOf(
-                        "team/project:main" to CnbBranch("main", SHA_C),
-                        "alice/project:feature/fork" to CnbBranch("feature/fork", SHA_A),
-                    ),
-            )
-        val client =
-            object : CnbClient by delegate {
-                override fun getRepository(path: String): CnbRepository =
-                    repository(path).copy(cloneUrl = "https://attacker.invalid/alice/project.git")
-            }
-
         val failure =
             assertThrows(CnbApiException::class.java) {
-                CnbOpenPullRequestTargetPushResolver.resolve(
-                    targetPushDelivery(),
-                    CnbLiveDeliveryRequirements(),
-                    client,
+                CnbOpenPullRequestTargetPushResolver.secureCloneUrl(
+                    "https://attacker.invalid/alice/project.git",
+                    "alice/project",
+                    "https://cnb.cool",
                 )
             }
 
@@ -252,12 +232,6 @@ class CnbOpenPullRequestTargetPushResolverTest {
                     commits[key] ?: throw CnbApiException("commit missing", statusCode = 404)
                 }
 
-                "getRepository" -> {
-                    val path = args[0].toString()
-                    calls += "getRepository:$path"
-                    repository(path)
-                }
-
                 "close" -> {
                     Unit
                 }
@@ -291,17 +265,6 @@ class CnbOpenPullRequestTargetPushResolverTest {
             targetSha = SHA_C,
             author = "alice",
             body = "Description $number",
-        )
-
-    private fun repository(path: String): CnbRepository =
-        CnbRepository(
-            path = path,
-            name = path.substringAfterLast('/'),
-            webUrl = "https://cnb.cool/$path",
-            cloneUrl = "https://cnb.cool/$path.git",
-            defaultBranch = "main",
-            status = CnbRepositoryStatus.OK,
-            visibility = CnbRepositoryVisibility.PUBLIC,
         )
 
     private fun targetPushDelivery(): CnbWebhookDelivery =

@@ -6,9 +6,12 @@ import dev.zxilly.jenkins.cnb.api.model.CnbRepositoryEventType
 import dev.zxilly.jenkins.cnb.status.CnbBuildMetadataConfiguration
 import dev.zxilly.jenkins.cnb.status.CnbBuildMetadataResolver
 import hudson.EnvVars
+import hudson.model.Action
+import hudson.model.Queue
 import hudson.model.TaskListener
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
 import org.jvnet.hudson.test.JenkinsRule
 import org.jvnet.hudson.test.junit.jupiter.WithJenkins
@@ -38,6 +41,7 @@ class CnbPushTriggerRecoveryTest {
     fun `archive push recovers a matching classic job without an SCM source`(jenkins: JenkinsRule) {
         val project = jenkins.createFreeStyleProject("classic-cnb")
         val trigger = CnbPushTrigger("primary", "team/project", "release/**")
+        trigger.setCiSkip(false)
         project.addTrigger(trigger)
 
         CnbPushTriggerRecovery.recover(
@@ -81,6 +85,7 @@ class CnbPushTriggerRecoveryTest {
         val project = jenkins.createFreeStyleProject("classic-tag-cnb")
         val trigger = CnbPushTrigger("primary", "team/project", "v1")
         trigger.setEventFilter("tag_push")
+        trigger.setCiSkip(false)
         project.addTrigger(trigger)
 
         CnbPushTriggerRecovery.recover(
@@ -122,6 +127,91 @@ class CnbPushTriggerRecoveryTest {
                 previous = null,
             )
         assertEquals("v1", metadata.target?.tag)
+    }
+
+    @Test
+    fun `push followed by deletion does not recover the obsolete revision`(jenkins: JenkinsRule) {
+        val project = jenkins.createFreeStyleProject("deleted-ref-recovery")
+        val trigger = CnbPushTrigger("primary", "team/project", "main").apply { setCiSkip(false) }
+
+        CnbPushTriggerRecovery.recover(
+            "primary",
+            "team/project",
+            listOf(
+                push("event-main-a", "refs/heads/main", "a".repeat(40)),
+                push("event-main-delete", "refs/heads/main", "0".repeat(40)),
+            ),
+            project,
+            trigger,
+        )
+        jenkins.waitUntilNoActivity()
+
+        assertEquals(0, project.builds.count())
+        assertEquals(0, Queue.getInstance().items.count { it.task == project })
+    }
+
+    @Test
+    fun `push after deletion recovers the recreated ref at its final revision`(jenkins: JenkinsRule) {
+        val project = jenkins.createFreeStyleProject("recreated-ref-recovery")
+        val trigger = CnbPushTrigger("primary", "team/project", "main").apply { setCiSkip(false) }
+        val finalSha = "b".repeat(40)
+
+        CnbPushTriggerRecovery.recover(
+            "primary",
+            "team/project",
+            listOf(
+                push("event-main-a", "refs/heads/main", "a".repeat(40)),
+                push("event-main-delete", "refs/heads/main", "0".repeat(40)),
+                push("event-main-b", "refs/heads/main", finalSha),
+            ),
+            project,
+            trigger,
+        )
+        jenkins.waitUntilNoActivity()
+
+        assertEquals(1, project.builds.count())
+        val build = requireNotNull(project.lastBuild)
+        assertEquals(finalSha, requireNotNull(build.getAction(CnbQueueAction::class.java)).sha)
+        assertEquals("event-main-b", requireNotNull(build.getCause(CnbRepositoryEventCause::class.java)).eventId)
+    }
+
+    @Test
+    fun `archive recovery reports only the refs whose queue effects failed`(jenkins: JenkinsRule) {
+        jenkins.jenkins.numExecutors = 0
+        val project = jenkins.createFreeStyleProject("classic-partial-recovery")
+        val trigger = CnbPushTrigger("primary", "team/project", "**").apply { setCiSkip(false) }
+        val main = push("event-main", "refs/heads/main", "a".repeat(40))
+        val release = push("event-release", "refs/heads/release", "b".repeat(40))
+        val veto =
+            object : Queue.QueueDecisionHandler() {
+                override fun shouldSchedule(
+                    task: Queue.Task,
+                    actions: MutableList<Action>,
+                ): Boolean = actions.filterIsInstance<CnbQueueAction>().none { it.ref == "refs/heads/release" }
+            }
+        Queue.QueueDecisionHandler.all().add(veto)
+
+        try {
+            val failure =
+                assertThrows(CnbPartialRepositoryEventDispatchException::class.java) {
+                    CnbPushTriggerRecovery.recover(
+                        "primary",
+                        "team/project",
+                        listOf(main, release),
+                        project,
+                        trigger,
+                    )
+                }
+
+            assertEquals(
+                setOf(CnbRepositoryEventPollingWork.eventKey("primary", "team/project", release)),
+                failure.retryKeys,
+            )
+            assertEquals("refs/heads/main", requireNotNull(Queue.getInstance().items.single().getAction(CnbQueueAction::class.java)).ref)
+        } finally {
+            Queue.QueueDecisionHandler.all().remove(veto)
+            Queue.getInstance().items.forEach(Queue.getInstance()::cancel)
+        }
     }
 
     private fun push(

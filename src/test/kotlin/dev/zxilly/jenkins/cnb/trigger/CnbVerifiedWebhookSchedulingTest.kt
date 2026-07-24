@@ -35,9 +35,67 @@ import org.jvnet.hudson.test.junit.jupiter.WithJenkins
 import java.lang.reflect.Proxy
 import java.nio.file.Files
 import java.time.Instant
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 class CnbVerifiedWebhookSchedulingTest {
+    @Test
+    @WithJenkins
+    fun `classic direct push is pinned to the verified commit for a matching GitSCM`(jenkins: JenkinsRule) {
+        val job = jenkins.createFreeStyleProject("direct-push-pin")
+        job.scm = GitSCM("https://cnb.cool/team/project.git")
+        val mismatched = jenkins.createFreeStyleProject("direct-push-wrong-remote")
+        mismatched.scm = GitSCM("https://cnb.cool/team/other.git")
+        val trigger = CnbPushTrigger("primary", "team/project", "main").apply { setCiSkip(false) }
+
+        val candidates =
+            CnbVerifiedWebhookPlanner
+                .classic(
+                    pushDelivery(),
+                    listOf(
+                        CnbClassicTriggerCandidate(job, trigger),
+                        CnbClassicTriggerCandidate(mismatched, trigger),
+                    ),
+                    openClient = ::targetPushClient,
+                )
+
+        val candidate = candidates.single()
+        assertEquals(job, candidate.job)
+        val checkout = requireNotNull(candidate.checkoutAction)
+        assertEquals(SHA_C, checkout.commit)
+        assertTrue(checkout.canOriginateFrom((job.scm as GitSCM).repositories))
+    }
+
+    @Test
+    @WithJenkins
+    fun `classic direct fork pull request is pinned through its verified source repository`(jenkins: JenkinsRule) {
+        val job = jenkins.createFreeStyleProject("direct-fork-pin")
+        job.scm = GitSCM("https://cnb.cool/alice/project.git")
+        val trigger = pullRequestTrigger().apply { setCiSkip(false) }
+        val delivery =
+            pullRequestDelivery().let { value ->
+                value.copy(
+                    payload =
+                        value.payload.copy(
+                            pullRequest = requireNotNull(value.payload.pullRequest).copy(sourceRepository = "alice/project"),
+                        ),
+                )
+            }
+
+        val candidate =
+            CnbVerifiedWebhookPlanner
+                .classic(
+                    delivery,
+                    listOf(CnbClassicTriggerCandidate(job, trigger)),
+                    openClient = ::targetPushClient,
+                ).single()
+
+        val checkout = requireNotNull(candidate.checkoutAction)
+        assertEquals(SHA_A, checkout.commit)
+        assertTrue(checkout.canOriginateFrom((job.scm as GitSCM).repositories))
+    }
+
     @Test
     @WithJenkins
     fun `classic target push plans every verified open pull request with its source checkout`(jenkins: JenkinsRule) {
@@ -158,6 +216,118 @@ class CnbVerifiedWebhookSchedulingTest {
         assertEquals(listOf(readyJob.fullName), planned.map { it.job.fullName })
         assertEquals(1, pullRequestCalls.get())
         assertEquals(1, labelCalls.get())
+    }
+
+    @Test
+    @WithJenkins
+    fun `nonmatching Git candidate does not add a clone lookup dependency`(jenkins: JenkinsRule) {
+        val matching = jenkins.createFreeStyleProject("matching-non-git")
+        val nonmatchingGit = jenkins.createFreeStyleProject("nonmatching-git")
+        nonmatchingGit.scm = GitSCM("https://cnb.cool/team/project.git")
+        val repositoryCalls = AtomicInteger()
+        val delegate =
+            pullRequestClient(
+                AtomicInteger(),
+                AtomicInteger(),
+                labels = listOf(CnbLabel("label-ready", "ready")),
+            )
+        val client =
+            object : CnbClient by delegate {
+                override fun getRepository(path: String): CnbRepository {
+                    repositoryCalls.incrementAndGet()
+                    throw CnbApiException("clone lookup must not run", statusCode = 503, retryable = true)
+                }
+            }
+
+        val planned =
+            CnbVerifiedWebhookPlanner.classic(
+                pullRequestDelivery(),
+                listOf(
+                    CnbClassicTriggerCandidate(matching, pullRequestTrigger(requiredLabels = "ready")),
+                    CnbClassicTriggerCandidate(nonmatchingGit, pullRequestTrigger(requiredLabels = "security")),
+                ),
+                openClient = { client },
+            )
+
+        assertEquals(listOf(matching.fullName), planned.map { it.job.fullName })
+        assertEquals(0, repositoryCalls.get())
+        assertEquals(null, planned.single().checkoutAction)
+    }
+
+    @Test
+    @WithJenkins
+    fun `non Git target push candidate does not depend on clone metadata`(jenkins: JenkinsRule) {
+        val job = jenkins.createFreeStyleProject("target-push-non-git")
+        val trigger =
+            CnbPushTrigger("primary", "team/project", "**").apply {
+                setEventFilter("tag_push")
+                setTriggerOpenPullRequestOnPush("both")
+                setCiSkip(false)
+            }
+        val repositoryCalls = AtomicInteger()
+        val delegate = targetPushClient()
+        val client =
+            object : CnbClient by delegate {
+                override fun getRepository(path: String): CnbRepository {
+                    repositoryCalls.incrementAndGet()
+                    throw CnbApiException("clone lookup must not run", statusCode = 503, retryable = true)
+                }
+            }
+
+        val candidate =
+            CnbVerifiedWebhookPlanner
+                .classic(
+                    pushDelivery(),
+                    listOf(CnbClassicTriggerCandidate(job, trigger)),
+                    openClient = { client },
+                ).single()
+
+        assertEquals(job, candidate.job)
+        assertEquals(CnbWebhookEvent.PULL_REQUEST_TARGET, candidate.delivery.payload.event)
+        assertEquals(null, candidate.checkoutAction)
+        assertEquals(0, repositoryCalls.get())
+    }
+
+    @Test
+    @WithJenkins
+    fun `one target push queues every pull request receipt once`(jenkins: JenkinsRule) {
+        jenkins.jenkins.numExecutors = 0
+        val job = jenkins.createFreeStyleProject("target-push-fanout")
+        val trigger =
+            CnbPushTrigger("primary", "team/project", "**").apply {
+                setEventFilter("tag_push")
+                setTriggerOpenPullRequestOnPush("both")
+                setCiSkip(false)
+            }
+        val pullRequests =
+            listOf(
+                livePullRequest().copy(
+                    number = "7",
+                    sourceRepo = "team/project",
+                    sourceBranch = "feature/first",
+                    sourceSha = SHA_A,
+                ),
+                livePullRequest().copy(
+                    number = "8",
+                    sourceRepo = "team/project",
+                    sourceBranch = "feature/second",
+                    sourceSha = SHA_B,
+                ),
+            )
+        val candidates =
+            CnbVerifiedWebhookPlanner.classic(
+                pushDelivery(deliveryId = "target-fanout-delivery"),
+                listOf(CnbClassicTriggerCandidate(job, trigger)),
+                openClient = { targetPushClient(pullRequests) },
+            )
+
+        assertEquals(2, candidates.size)
+        assertEquals(2, candidates.map { it.deliveryScope }.distinct().size)
+        assertTrue(candidates.all { it.checkoutAction == null })
+        assertEquals(2, CnbAtomicQueueScheduler.schedule(candidates))
+        assertEquals(0, CnbAtomicQueueScheduler.schedule(candidates))
+        assertEquals(2, Queue.getInstance().items.count { it.task == job })
+        Queue.getInstance().items.forEach(Queue.getInstance()::cancel)
     }
 
     @Test
@@ -332,6 +502,108 @@ class CnbVerifiedWebhookSchedulingTest {
 
     @Test
     @WithJenkins
+    fun `run history is loaded without holding the Jenkins queue lock`(jenkins: JenkinsRule) {
+        jenkins.jenkins.numExecutors = 0
+        val job = jenkins.createFreeStyleProject("history-outside-queue-lock")
+        val delivery = pushDelivery()
+        val candidate = CnbVerifiedQueueCandidate(job, delivery, requireNotNull(CnbQueueIdentity.from(delivery)))
+        val executor = Executors.newSingleThreadExecutor()
+
+        try {
+            assertEquals(
+                1,
+                CnbAtomicQueueScheduler.schedule(listOf(candidate)) {
+                    executor
+                        .submit { Queue.withLock(Runnable {}) }
+                        .get(5, TimeUnit.SECONDS)
+                    CnbDeliveryHistory.RunSummary.EMPTY
+                },
+            )
+        } finally {
+            executor.shutdownNow()
+            Queue.getInstance().items.forEach(Queue.getInstance()::cancel)
+        }
+    }
+
+    @Test
+    @WithJenkins
+    fun `queue to run transition is retried and its receipt closes the run visibility gap`(jenkins: JenkinsRule) {
+        jenkins.jenkins.numExecutors = 0
+        val job = jenkins.createFreeStyleProject("queue-run-transition")
+        job.quietPeriod = 0
+        val original = pushDelivery(SHA_A, "transition-delivery")
+        val originalIdentity = requireNotNull(CnbQueueIdentity.from(original))
+        requireNotNull(
+            job.scheduleBuild2(
+                0,
+                CnbQueueAction(originalIdentity, original.payload.deliveryId, CnbDeliveryScope.DIRECT),
+            ),
+        )
+        val queuedId = Queue.getInstance().items.single().id
+        val scans = AtomicInteger()
+
+        val replay = pushDelivery(SHA_B, original.payload.deliveryId)
+        val replayCandidate =
+            CnbVerifiedQueueCandidate(job, replay, requireNotNull(CnbQueueIdentity.from(replay)))
+        val scheduled =
+            CnbAtomicQueueScheduler.schedule(listOf(replayCandidate)) {
+                if (scans.incrementAndGet() == 1) {
+                    jenkins.jenkins.numExecutors = 1
+                    assertEquals(false, waitForLeftItem(queuedId).isCancelled)
+                }
+                // Model the narrow interval where onLeft completed but Job.builds has not
+                // exposed the corresponding Run to this history scan yet.
+                CnbDeliveryHistory.RunSummary.EMPTY
+            }
+
+        assertEquals(0, scheduled)
+        assertEquals(2, scans.get(), "The queue-to-run watermark change must force a fresh history scan")
+        jenkins.waitUntilNoActivity()
+        assertEquals(1, job.builds.count())
+    }
+
+    @Test
+    @WithJenkins
+    fun `continuous queue transitions fail after a bounded number of history scans`(jenkins: JenkinsRule) {
+        jenkins.jenkins.numExecutors = 0
+        val job = jenkins.createFreeStyleProject("unstable-queue-history")
+        val delivery = pushDelivery()
+        val candidate = CnbVerifiedQueueCandidate(job, delivery, requireNotNull(CnbQueueIdentity.from(delivery)))
+        val scans = AtomicInteger()
+
+        val failure =
+            assertThrows(CnbDeliveryHistoryUnstableException::class.java) {
+                CnbAtomicQueueScheduler.schedule(listOf(candidate)) {
+                    scans.incrementAndGet()
+                    CnbQueueTransitionWatermark.advance(job)
+                    CnbDeliveryHistory.RunSummary.EMPTY
+                }
+            }
+
+        assertEquals(8, failure.attempts)
+        assertEquals(8, scans.get())
+        assertEquals(0, Queue.getInstance().items.count { it.task == job })
+    }
+
+    @Test
+    @WithJenkins
+    fun `different comment deliveries may queue the same pull request revision`(jenkins: JenkinsRule) {
+        jenkins.jenkins.numExecutors = 0
+        val job = jenkins.createFreeStyleProject("separate-comment-deliveries")
+
+        fun candidate(deliveryId: String): CnbVerifiedQueueCandidate {
+            val delivery = commentDelivery(deliveryId)
+            return CnbVerifiedQueueCandidate(job, delivery, requireNotNull(CnbQueueIdentity.from(delivery)))
+        }
+
+        assertEquals(1, CnbAtomicQueueScheduler.schedule(listOf(candidate("comment-delivery-1"))))
+        assertEquals(1, CnbAtomicQueueScheduler.schedule(listOf(candidate("comment-delivery-2"))))
+        assertEquals(2, Queue.getInstance().items.size)
+        Queue.getInstance().items.forEach(Queue.getInstance()::cancel)
+    }
+
+    @Test
+    @WithJenkins
     fun `atomic scheduler cancels only an older queued revision after commit`(jenkins: JenkinsRule) {
         jenkins.jenkins.numExecutors = 0
         val job = jenkins.createFreeStyleProject("superseded")
@@ -365,15 +637,16 @@ class CnbVerifiedWebhookSchedulingTest {
 
     @Test
     @WithJenkins
-    fun `new commit policy compares the source SHA with the last durable pull request delivery`(jenkins: JenkinsRule) {
+    fun `each job accepts a verified revision only once across queue history and reload`(jenkins: JenkinsRule) {
         var job = jenkins.createFreeStyleProject("new-pr-revision")
         job.quietPeriod = 0
 
         fun candidate(
             sha: String,
+            deliveryId: String = "delivery-${sha.first()}",
             onlyNew: Boolean = true,
         ): CnbVerifiedQueueCandidate {
-            val delivery = pullRequestDelivery(sha)
+            val delivery = pullRequestDelivery(sha, deliveryId)
             return CnbVerifiedQueueCandidate(
                 job = job,
                 delivery = delivery,
@@ -387,12 +660,13 @@ class CnbVerifiedWebhookSchedulingTest {
         jenkins.jenkins.reload()
         job = requireNotNull(jenkins.jenkins.getItemByFullName("new-pr-revision", hudson.model.FreeStyleProject::class.java))
 
+        assertEquals(0, CnbAtomicQueueScheduler.schedule(listOf(candidate(SHA_B, "delivery-a", onlyNew = false))))
         assertEquals(0, CnbAtomicQueueScheduler.schedule(listOf(candidate(SHA_A))))
-        assertEquals(1, CnbAtomicQueueScheduler.schedule(listOf(candidate(SHA_A, onlyNew = false))))
+        assertEquals(1, CnbAtomicQueueScheduler.schedule(listOf(candidate(SHA_A, "delivery-a-2", onlyNew = false))))
         jenkins.waitUntilNoActivity()
         assertEquals(1, CnbAtomicQueueScheduler.schedule(listOf(candidate(SHA_B))))
         jenkins.waitUntilNoActivity()
-        assertEquals(1, CnbAtomicQueueScheduler.schedule(listOf(candidate(SHA_A))))
+        assertEquals(1, CnbAtomicQueueScheduler.schedule(listOf(candidate(SHA_A, "delivery-a-return"))))
         jenkins.waitUntilNoActivity()
         assertEquals(4, job.builds.count())
     }
@@ -462,7 +736,9 @@ class CnbVerifiedWebhookSchedulingTest {
         }
     }
 
-    private fun targetPushClient(): CnbClient =
+    private fun targetPushClient(
+        pullRequests: List<CnbPullRequest> = listOf(livePullRequest().copy(sourceRepo = "alice/project")),
+    ): CnbClient =
         Proxy.newProxyInstance(
             CnbClient::class.java.classLoader,
             arrayOf(CnbClient::class.java),
@@ -474,27 +750,36 @@ class CnbVerifiedWebhookSchedulingTest {
                 }
 
                 "getBranch" -> {
-                    when ("${args[0]}:${args[1]}") {
-                        "team/project:main" -> CnbBranch("main", SHA_C)
-                        "alice/project:feature/change" -> CnbBranch("feature/change", SHA_A)
-                        else -> throw UnsupportedOperationException("unexpected branch ${args.toList()}")
+                    val repository = args[0].toString()
+                    val branch = args[1].toString()
+                    if (repository == "team/project" && branch == "main") {
+                        CnbBranch("main", SHA_C)
+                    } else {
+                        pullRequests
+                            .firstOrNull { pullRequest ->
+                                pullRequest.sourceRepo == repository && pullRequest.sourceBranch == branch
+                            }?.let { pullRequest -> CnbBranch(branch, pullRequest.sourceSha) }
+                            ?: throw UnsupportedOperationException("unexpected branch ${args.toList()}")
                     }
                 }
 
                 "listPullRequests" -> {
-                    listOf(livePullRequest().copy(sourceRepo = "alice/project"))
+                    pullRequests
                 }
 
                 "getPullRequest" -> {
-                    livePullRequest().copy(sourceRepo = "alice/project")
+                    val number = args[1].toString()
+                    pullRequests.firstOrNull { it.number == number }
+                        ?: throw CnbApiException("pull request missing", statusCode = 404)
                 }
 
                 "getRepository" -> {
+                    val path = args[0] as String
                     CnbRepository(
-                        path = "alice/project",
-                        name = "project",
-                        webUrl = "https://cnb.cool/alice/project",
-                        cloneUrl = "https://cnb.cool/alice/project.git",
+                        path = path,
+                        name = path.substringAfterLast('/'),
+                        webUrl = "https://cnb.cool/$path",
+                        cloneUrl = "https://cnb.cool/$path.git",
                         defaultBranch = "main",
                         status = CnbRepositoryStatus.OK,
                         visibility = CnbRepositoryVisibility.PUBLIC,
@@ -549,10 +834,14 @@ class CnbVerifiedWebhookSchedulingTest {
             author = "alice",
         )
 
-    private fun pullRequestDelivery(sourceSha: String = SHA_A): CnbWebhookDelivery =
+    private fun pullRequestDelivery(
+        sourceSha: String = SHA_A,
+        deliveryId: String = "delivery-1",
+    ): CnbWebhookDelivery =
         CnbWebhookDelivery(
             "primary",
             basePayload(CnbWebhookEvent.PULL_REQUEST_UPDATE).copy(
+                deliveryId = deliveryId,
                 pullRequest =
                     CnbWebhookPullRequest(
                         id = "pr-7",
@@ -573,11 +862,12 @@ class CnbVerifiedWebhookSchedulingTest {
             "test",
         )
 
-    private fun commentDelivery(): CnbWebhookDelivery =
+    private fun commentDelivery(deliveryId: String = "comment-delivery-9"): CnbWebhookDelivery =
         pullRequestDelivery().let { delivery ->
             delivery.copy(
                 payload =
                     delivery.payload.copy(
+                        deliveryId = deliveryId,
                         event = CnbWebhookEvent.PULL_REQUEST_COMMENT,
                         pullRequest =
                             requireNotNull(delivery.payload.pullRequest).copy(
@@ -590,14 +880,29 @@ class CnbVerifiedWebhookSchedulingTest {
             )
         }
 
-    private fun pushDelivery(sha: String = SHA_C): CnbWebhookDelivery =
+    private fun pushDelivery(
+        sha: String = SHA_C,
+        deliveryId: String = "delivery-${sha.first()}",
+    ): CnbWebhookDelivery =
         CnbWebhookDelivery(
             "primary",
             basePayload(CnbWebhookEvent.PUSH).let { payload ->
-                payload.copy(ref = payload.ref.copy(sha = sha, commit = sha))
+                payload.copy(
+                    deliveryId = deliveryId,
+                    ref = payload.ref.copy(sha = sha, commit = sha),
+                )
             },
             "test",
         )
+
+    private fun waitForLeftItem(queueId: Long): Queue.LeftItem {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        while (System.nanoTime() < deadline) {
+            Queue.getInstance().leftItems.firstOrNull { it.id == queueId }?.let { return it }
+            Thread.sleep(25)
+        }
+        error("Queue item $queueId did not transition to a Run")
+    }
 
     private fun basePayload(event: CnbWebhookEvent): CnbWebhookPayload =
         CnbWebhookPayload(

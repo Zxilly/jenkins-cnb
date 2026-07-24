@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Test
 import org.jvnet.hudson.test.JenkinsRule
 import org.jvnet.hudson.test.junit.jupiter.WithJenkins
+import java.io.StringWriter
 import java.time.Instant
 
 @WithJenkins
@@ -44,7 +45,7 @@ class CnbBuildDescriptionRunListenerTest {
     }
 
     @Test
-    fun `escapes webhook fields before storing a Jenkins build description`(jenkins: JenkinsRule) {
+    fun `stores plain text and lets the Jenkins formatter escape the build description`(jenkins: JenkinsRule) {
         val project = jenkins.createFreeStyleProject("descriptions-hostile")
         project.addTrigger(CnbPushTrigger("primary", "team/project", "**"))
         val hostile = delivery(ref = "main<img src=x onerror='alert(1)'>", actor = "alice & <admin>")
@@ -53,8 +54,14 @@ class CnbBuildDescriptionRunListenerTest {
 
         val description = requireNotNull(build.description)
         assertEquals(
-            "CNB push event for team/project at main&lt;img src=x onerror=&#039;alert(1)&#039;&gt; by alice &amp; &lt;admin&gt;",
+            "CNB push event for team/project at main<img src=x onerror='alert(1)'> by alice & <admin>",
             description,
+        )
+        val rendered = StringWriter()
+        jenkins.jenkins.markupFormatter.translate(description, rendered)
+        assertEquals(
+            "CNB push event for team/project at main&lt;img src=x onerror=&#039;alert(1)&#039;&gt; by alice &amp; &lt;admin&gt;",
+            rendered.toString(),
         )
     }
 

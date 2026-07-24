@@ -516,6 +516,36 @@ class CnbRepositoryEventPollingWorkTest {
     }
 
     @Test
+    fun `processor durably acknowledges successful event keys from a partial batch`() {
+        val now = Instant.parse("2026-07-15T10:30:00Z")
+        val first = event("PushEvent", CnbRepositoryEventPayload(ref = "refs/heads/main")).copy(id = "event-1")
+        val second = event("PushEvent", CnbRepositoryEventPayload(ref = "refs/heads/release")).copy(id = "event-2")
+        val store = CnbRepositoryEventDedupStore(directory.resolve("partial-batch.properties"))
+        var dispatched = emptyList<String>()
+        val secondKey = CnbRepositoryEventPollingWork.eventKey("primary", "team/project", second)
+
+        assertThrows(CnbPartialRepositoryEventDispatchException::class.java) {
+            CnbRepositoryEventHourProcessor.process(
+                "primary",
+                "team/project",
+                listOf(first, second),
+                now,
+                store,
+            ) { events ->
+                dispatched = events.map { it.id }
+                throw CnbPartialRepositoryEventDispatchException(
+                    setOf(secondKey),
+                    IllegalStateException("queue refused second ref"),
+                )
+            }
+        }
+
+        assertEquals(listOf("event-1", "event-2"), dispatched)
+        assertTrue(store.contains("primary", "team/project", CnbRepositoryEventPollingWork.eventKey("primary", "team/project", first), now))
+        assertFalse(store.contains("primary", "team/project", secondKey, now))
+    }
+
+    @Test
     fun `failed consumer is retried without repeating a successful consumer`() {
         val now = Instant.parse("2026-07-15T10:30:00Z")
         val event = event("PushEvent", CnbRepositoryEventPayload(ref = "refs/heads/main"))
