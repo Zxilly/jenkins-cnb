@@ -85,7 +85,8 @@ internal object CnbWebhookRefLifecycle {
         candidates: List<CnbVerifiedQueueCandidate>,
     ): Boolean {
         val transition = transition(delivery) ?: return false
-        val jobs = observers.mapTo(HashSet()) { it.job }
+        val jobs = HashSet<Job<*, *>>(observers.size)
+        for (observer in observers) jobs.add(observer.job)
         return candidates.any { candidate ->
             candidate.job in jobs &&
                 candidate.delivery.serverId == delivery.serverId &&
@@ -103,28 +104,36 @@ internal object CnbWebhookRefLifecycle {
     ): List<CnbVerifiedQueueCandidate> {
         val transition = transition(delivery) ?: return candidates
         if (observers.isEmpty()) return candidates
-        val scoped =
-            observers.map { observer ->
+        val scoped = ArrayList<CnbScopedRefLifecycleTransition>(observers.size)
+        for (observer in observers) {
+            scoped +=
                 CnbScopedRefLifecycleTransition(
                     classicJobRefLifecycleScope(delivery.serverId, delivery.payload.repository.slug, observer.job),
                     transition,
                 )
-            }
+        }
         val results = store.apply(scoped)
         val stateByJob = LinkedHashMap<Job<*, *>, CnbRefLifecycleResult>(observers.size)
         for ((index, observer) in observers.withIndex()) stateByJob[observer.job] = results[index]
 
-        return candidates.mapNotNull { candidate ->
-            val state = stateByJob[candidate.job] ?: return@mapNotNull candidate
+        val updated = ArrayList<CnbVerifiedQueueCandidate>(candidates.size)
+        for (candidate in candidates) {
+            val state = stateByJob[candidate.job]
+            if (state == null) {
+                updated += candidate
+                continue
+            }
             if (candidate.delivery.serverId != delivery.serverId ||
                 candidate.delivery.payload.deliveryId != delivery.payload.deliveryId ||
                 candidate.identity.ref != transition.qualifiedRef
             ) {
-                return@mapNotNull candidate
+                updated += candidate
+                continue
             }
-            if (!state.current || state.present != transition.present) return@mapNotNull null
-            candidate.copy(identity = candidate.identity.copy(refGeneration = state.generation))
+            if (!state.current || state.present != transition.present) continue
+            updated += candidate.copy(identity = candidate.identity.copy(refGeneration = state.generation))
         }
+        return updated
     }
 
     private fun currentObjectIdIsPresent(delivery: CnbWebhookDelivery): Boolean {

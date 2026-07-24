@@ -140,6 +140,14 @@ internal class CnbRefLifecycleStore(
             if (!originals.containsKey(key)) originals[key] = entries[key]
         }
 
+        fun rollback(failure: Exception): Nothing {
+            for ((key, original) in originals) {
+                if (original == null) entries.remove(key) else entries[key] = original
+            }
+            generationFloor = originalGenerationFloor
+            throw failure
+        }
+
         try {
             for ((scope, transition) in transitions) {
                 val key = refScopeHash(scope, transition.qualifiedRef)
@@ -186,12 +194,10 @@ internal class CnbRefLifecycleStore(
             }
             journal.persist(records)
             return results
-        } catch (failure: Exception) {
-            for ((key, original) in originals) {
-                if (original == null) entries.remove(key) else entries[key] = original
-            }
-            generationFloor = originalGenerationFloor
-            throw failure
+        } catch (failure: IOException) {
+            rollback(failure)
+        } catch (failure: RuntimeException) {
+            rollback(failure)
         }
     }
 
@@ -1039,6 +1045,7 @@ private class AppendOnlyStateJournal<Record>(
         )
     }
 
+    @Throws(IOException::class)
     fun persist(records: List<Record>) {
         if (records.isEmpty()) return
         val encoded = ByteArrayOutputStream()

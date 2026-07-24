@@ -957,10 +957,13 @@ internal object CnbPushTriggerRecovery {
                     },
                 )
             try {
+                val scopedTransitions =
+                    ArrayList<CnbScopedRefLifecycleTransition>(recovered.size)
+                for (transition in recovered) {
+                    scopedTransitions += CnbScopedRefLifecycleTransition(lifecycleScope, transition.lifecycle)
+                }
                 val lifecycleResults =
-                    lifecycleStore.apply(
-                        recovered.map { transition -> CnbScopedRefLifecycleTransition(lifecycleScope, transition.lifecycle) },
-                    )
+                    lifecycleStore.apply(scopedTransitions)
                 val push = recovered.last()
                 val lifecycle = lifecycleResults.last()
                 val pushCommit = push.commit

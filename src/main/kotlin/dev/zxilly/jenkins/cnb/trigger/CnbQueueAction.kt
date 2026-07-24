@@ -287,21 +287,23 @@ internal object CnbDeliveryHistory {
         action: (Queue, List<StableHistory>) -> T,
     ): T {
         require(queries.isNotEmpty()) { "At least one CNB delivery history query is required" }
-        val jobs = queries.mapTo(linkedSetOf()) { it.job }
+        val jobs = LinkedHashSet<Job<*, *>>(queries.size)
+        for (query in queries) jobs.add(query.job)
         repeat(MAX_STABILITY_ATTEMPTS) {
             lateinit var transitions: Map<Job<*, *>, TransitionSnapshot>
             Queue.withLock {
                 transitions = captureTransitions(Queue.getInstance(), jobs)
             }
 
-            val histories =
-                queries.map { query ->
+            val histories = ArrayList<StableHistory>(queries.size)
+            for (query in queries) {
+                histories +=
                     StableHistory(
                         query,
                         loadRunHistory(query),
                         transitions.getValue(query.job).entries,
                     )
-                }
+            }
 
             var stable = false
             var result: T? = null

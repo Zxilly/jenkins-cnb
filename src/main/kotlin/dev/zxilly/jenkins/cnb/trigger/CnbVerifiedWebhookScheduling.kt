@@ -84,8 +84,10 @@ internal object CnbVerifiedWebhookPlanner {
                     if (snapshot.revisionMatches) {
                         val identity = CnbQueueIdentity.from(delivery)
                         if (identity != null) {
-                            val liveCandidates =
-                                directCandidates.filter { candidate -> candidate.trigger.matchesLive(delivery, snapshot) }
+                            val liveCandidates = ArrayList<CnbClassicTriggerCandidate>(directCandidates.size)
+                            for (candidate in directCandidates) {
+                                if (candidate.trigger.matchesLive(delivery, snapshot)) liveCandidates += candidate
+                            }
                             val sourceCloneUrl =
                                 if (liveCandidates.any { CnbClassicGitRevisionAction.supports(it.job) }) {
                                     directSourceCloneUrl(delivery, snapshot, client)
@@ -130,10 +132,12 @@ internal object CnbVerifiedWebhookPlanner {
                         val sourceSha =
                             pullRequest.delivery.payload.pullRequest
                                 ?.sourceSha ?: continue
-                        val liveCandidates =
-                            targetPushCandidates.filter { candidate ->
-                                candidate.trigger.matchesLive(pullRequest.delivery, pullRequest.snapshot)
+                        val liveCandidates = ArrayList<CnbClassicTriggerCandidate>(targetPushCandidates.size)
+                        for (candidate in targetPushCandidates) {
+                            if (candidate.trigger.matchesLive(pullRequest.delivery, pullRequest.snapshot)) {
+                                liveCandidates += candidate
                             }
+                        }
                         val sourceCloneUrl =
                             if (liveCandidates.any { CnbClassicGitRevisionAction.supports(it.job) }) {
                                 directSourceCloneUrl(pullRequest.delivery, pullRequest.snapshot, client)
@@ -433,8 +437,9 @@ internal object CnbAtomicQueueScheduler {
         }
         if (distinct.isEmpty()) return 0
 
-        val queries =
-            distinct.map { candidate ->
+        val queries = ArrayList<CnbDeliveryHistory.Query>(distinct.size)
+        for (candidate in distinct) {
+            queries +=
                 CnbDeliveryHistory.Query(
                     job = candidate.job,
                     incoming = candidate.identity,
@@ -443,7 +448,7 @@ internal object CnbAtomicQueueScheduler {
                     deduplicateRevision = candidate.delivery.payload.event in REVISION_DEDUPLICATED_EVENTS,
                     onlyIfNewPullRequestCommits = candidate.onlyIfNewPullRequestCommits,
                 )
-            }
+        }
         var newlyQueued: List<CnbVerifiedQueueCandidate> = emptyList()
         CnbDeliveryHistory.withStableQueue(queries, loadRunHistory) { queue, histories ->
             val eligible = ArrayList<CnbVerifiedQueueCandidate>(distinct.size)

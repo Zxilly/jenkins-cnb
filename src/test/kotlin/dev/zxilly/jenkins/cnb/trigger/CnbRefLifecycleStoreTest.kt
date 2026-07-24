@@ -2,9 +2,11 @@ package dev.zxilly.jenkins.cnb.trigger
 
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import java.io.IOException
 import java.nio.file.Path
 import java.time.Instant
 
@@ -62,6 +64,32 @@ class CnbRefLifecycleStoreTest {
         store = CnbRefLifecycleStore(path, capacity = 1)
         val reappeared = store.apply(listOf(request(scope, "main", true, 3, "3"))).single()
         assertTrue(reappeared.generation > 0L)
+    }
+
+    @Test
+    fun `persistence failure rolls back the in-memory ref lifecycle state`() {
+        val path = temporaryDirectory.resolve("failed-lifecycle-append.journal")
+        val scope = scope("job")
+        var failPersistence = false
+        val store =
+            CnbRefLifecycleStore(
+                path,
+                beforePersistence = {
+                    if (failPersistence) throw IOException("injected lifecycle persistence failure")
+                },
+            )
+        store.apply(listOf(request(scope, "main", true, 1, "1")))
+        failPersistence = true
+
+        assertThrows(IOException::class.java) {
+            store.apply(listOf(request(scope, "main", false, 2, "2")))
+        }
+
+        failPersistence = false
+        val replay = store.apply(listOf(request(scope, "main", true, 1, "1"))).single()
+        assertTrue(replay.current)
+        assertTrue(replay.present)
+        assertEquals(0L, replay.generation)
     }
 
     private fun scope(consumer: String) =
