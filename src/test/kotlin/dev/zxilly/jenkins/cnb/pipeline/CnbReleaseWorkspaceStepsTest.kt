@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.IOException
 import java.lang.reflect.Proxy
+import java.net.SocketTimeoutException
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.LinkOption
@@ -28,6 +29,7 @@ import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.ArrayList
 import java.util.LinkedHashMap
+import java.util.concurrent.CancellationException
 
 class CnbReleaseWorkspaceStepsTest {
     @TempDir
@@ -81,6 +83,7 @@ class CnbReleaseWorkspaceStepsTest {
         val client =
             client(
                 mapOf(
+                    "getRelease" to { CnbRelease(id = "release-1", tagName = "v1.0.0") },
                     "uploadReleaseAsset" to { args ->
                         val source = requireNotNull(args)[3] as CnbRepeatableInput
                         val first = source.openStream().use { it.readAllBytes() }
@@ -156,6 +159,377 @@ class CnbReleaseWorkspaceStepsTest {
     }
 
     @Test
+    fun `overwrite upload never treats preexisting matching content as a successful overwrite`() {
+        val workspacePath = temporaryDirectory.resolve("overwrite-preexisting-match")
+        Files.createDirectories(workspacePath)
+        Files.writeString(workspacePath.resolve("plugin.hpi"), "plugin")
+        var uploads = 0
+        val client =
+            client(
+                mapOf(
+                    "getRelease" to { releaseWithAsset("plugin".toByteArray()) },
+                    "uploadReleaseAsset" to {
+                        uploads++
+                        throw IllegalStateException("overwrite forbidden")
+                    },
+                ),
+            )
+
+        listOf(false, true).forEach { resumed ->
+            val failure =
+                assertThrows(IllegalStateException::class.java) {
+                    CnbReleaseWorkspaceTransfer.upload(
+                        uploadRequest("plugin.hpi", overwrite = true, ttlDays = 7),
+                        context,
+                        client,
+                        FilePath(workspacePath.toFile()),
+                        resumed = resumed,
+                    )
+                }
+            assertEquals("overwrite forbidden", failure.message)
+        }
+
+        assertEquals(2, uploads)
+    }
+
+    @Test
+    fun `overwrite with unknown existing content neither downloads it nor masks upload failure`() {
+        val workspacePath = temporaryDirectory.resolve("overwrite-unknown-existing")
+        Files.createDirectories(workspacePath)
+        Files.writeString(workspacePath.resolve("plugin.hpi"), "plugin")
+        var uploads = 0
+        var downloads = 0
+        var failUpload = false
+        val client =
+            client(
+                mapOf(
+                    "getRelease" to {
+                        CnbRelease(
+                            id = "release-1",
+                            tagName = "v1.0.0",
+                            assets = listOf(CnbReleaseAsset("asset-1", "plugin.hpi", "plugin.hpi", 6)),
+                        )
+                    },
+                    "downloadReleaseAsset" to {
+                        downloads++
+                        throw AssertionError("overwrite preflight must not download the old asset")
+                    },
+                    "uploadReleaseAsset" to {
+                        uploads++
+                        if (failUpload) throw IllegalStateException("overwrite failed")
+                        Unit
+                    },
+                ),
+            )
+        val request = uploadRequest("plugin.hpi", overwrite = true)
+        val workspace = FilePath(workspacePath.toFile())
+
+        CnbReleaseWorkspaceTransfer.upload(request, context, client, workspace, resumed = true)
+        failUpload = true
+        val failure =
+            assertThrows(IllegalStateException::class.java) {
+                CnbReleaseWorkspaceTransfer.upload(request, context, client, workspace, resumed = true)
+            }
+
+        assertEquals("overwrite failed", failure.message)
+        assertEquals(2, uploads)
+        assertEquals(0, downloads)
+    }
+
+    @Test
+    fun `wrapped preflight interruption prevents upload and post inspection`() {
+        val workspacePath = temporaryDirectory.resolve("interrupted-preflight")
+        Files.createDirectories(workspacePath)
+        Files.writeString(workspacePath.resolve("plugin.hpi"), "plugin")
+        var inspections = 0
+        var uploads = 0
+        var downloads = 0
+        val client =
+            client(
+                mapOf(
+                    "getRelease" to {
+                        inspections++
+                        throw IllegalStateException("wrapped interruption", InterruptedException("cancelled"))
+                    },
+                    "uploadReleaseAsset" to {
+                        uploads++
+                        Unit
+                    },
+                    "downloadReleaseAsset" to {
+                        downloads++
+                        throw AssertionError("cancelled upload must not inspect remote content")
+                    },
+                ),
+            )
+
+        try {
+            val failure =
+                assertThrows(IllegalStateException::class.java) {
+                    CnbReleaseWorkspaceTransfer.upload(
+                        uploadRequest("plugin.hpi", overwrite = true),
+                        context,
+                        client,
+                        FilePath(workspacePath.toFile()),
+                    )
+                }
+            assertEquals("wrapped interruption", failure.message)
+            assertTrue(Thread.currentThread().isInterrupted)
+        } finally {
+            Thread.interrupted()
+        }
+
+        assertEquals(1, inspections)
+        assertEquals(0, uploads)
+        assertEquals(0, downloads)
+    }
+
+    @Test
+    fun `wrapped upload cancellation prevents post inspection`() {
+        val workspacePath = temporaryDirectory.resolve("interrupted-upload")
+        Files.createDirectories(workspacePath)
+        Files.writeString(workspacePath.resolve("plugin.hpi"), "plugin")
+        var inspections = 0
+        var uploads = 0
+        val client =
+            client(
+                mapOf(
+                    "getRelease" to {
+                        inspections++
+                        CnbRelease(id = "release-1", tagName = "v1.0.0")
+                    },
+                    "uploadReleaseAsset" to {
+                        uploads++
+                        throw IllegalStateException("wrapped cancellation", CancellationException("cancelled"))
+                    },
+                ),
+            )
+
+        try {
+            val failure =
+                assertThrows(IllegalStateException::class.java) {
+                    CnbReleaseWorkspaceTransfer.upload(
+                        uploadRequest("plugin.hpi"),
+                        context,
+                        client,
+                        FilePath(workspacePath.toFile()),
+                    )
+                }
+            assertEquals("wrapped cancellation", failure.message)
+            assertTrue(Thread.currentThread().isInterrupted)
+        } finally {
+            Thread.interrupted()
+        }
+
+        assertEquals(1, inspections)
+        assertEquals(1, uploads)
+    }
+
+    @Test
+    fun `upload response timeout still converges after post inspection`() {
+        val workspacePath = temporaryDirectory.resolve("upload-response-timeout")
+        Files.createDirectories(workspacePath)
+        Files.writeString(workspacePath.resolve("plugin.hpi"), "plugin")
+        var inspections = 0
+        var uploads = 0
+        var remoteBytes: ByteArray? = null
+        val client =
+            client(
+                mapOf(
+                    "getRelease" to {
+                        inspections++
+                        releaseWithAsset(remoteBytes)
+                    },
+                    "uploadReleaseAsset" to { args ->
+                        uploads++
+                        remoteBytes = (requireNotNull(args)[3] as CnbRepeatableInput).openStream().use { it.readAllBytes() }
+                        throw IllegalStateException("wrapped timeout", SocketTimeoutException("response timed out"))
+                    },
+                ),
+            )
+
+        val result =
+            CnbReleaseWorkspaceTransfer.upload(
+                uploadRequest("plugin.hpi"),
+                context,
+                client,
+                FilePath(workspacePath.toFile()),
+            ) as Map<*, *>
+
+        assertEquals("uploaded", result["operation"])
+        assertEquals(2, inspections)
+        assertEquals(1, uploads)
+        assertFalse(Thread.currentThread().isInterrupted)
+    }
+
+    @Test
+    fun `upload converges after verification response is lost`() {
+        val workspacePath = temporaryDirectory.resolve("verification-loss")
+        Files.createDirectories(workspacePath)
+        Files.writeString(workspacePath.resolve("plugin.hpi"), "plugin")
+        var uploaded: ByteArray? = null
+        val client =
+            client(
+                mapOf(
+                    "uploadReleaseAsset" to { args ->
+                        uploaded = (requireNotNull(args)[3] as CnbRepeatableInput).openStream().use { it.readAllBytes() }
+                        throw IOException("verification response lost")
+                    },
+                    "getRelease" to { releaseWithAsset(uploaded) },
+                ),
+            )
+
+        val result =
+            CnbReleaseWorkspaceTransfer.upload(
+                uploadRequest("plugin.hpi"),
+                context,
+                client,
+                FilePath(workspacePath.toFile()),
+            ) as Map<*, *>
+
+        assertEquals("uploaded", result["operation"])
+        assertEquals("plugin", uploaded?.decodeToString())
+        assertTrue(Files.list(workspacePath).use { paths -> paths.noneMatch { it.fileName.toString().startsWith(".cnb-upload-") } })
+    }
+
+    @Test
+    fun `new upload execution converges after verification and immediate inspection both fail`() {
+        val workspacePath = temporaryDirectory.resolve("cross-execution-verification-loss")
+        Files.createDirectories(workspacePath)
+        Files.writeString(workspacePath.resolve("plugin.hpi"), "plugin")
+        var uploaded: ByteArray? = null
+        var uploads = 0
+        var inspections = 0
+        val client =
+            client(
+                mapOf(
+                    "getRelease" to {
+                        inspections++
+                        when (inspections) {
+                            1 -> CnbRelease(id = "release-1", tagName = "v1.0.0")
+                            2 -> throw IllegalStateException("inspection unavailable")
+                            else -> releaseWithAsset(requireNotNull(uploaded))
+                        }
+                    },
+                    "uploadReleaseAsset" to { args ->
+                        uploads++
+                        uploaded = (requireNotNull(args)[3] as CnbRepeatableInput).openStream().use { it.readAllBytes() }
+                        throw IllegalStateException("verification response lost")
+                    },
+                ),
+            )
+        val workspace = FilePath(workspacePath.toFile())
+
+        assertThrows(IllegalStateException::class.java) {
+            CnbReleaseWorkspaceTransfer.upload(
+                uploadRequest("plugin.hpi"),
+                context,
+                client,
+                workspace,
+                transferId = "12345678-1234-1234-1234-123456789abc",
+            )
+        }
+        val result =
+            CnbReleaseWorkspaceTransfer.upload(
+                uploadRequest("plugin.hpi"),
+                context,
+                client,
+                workspace,
+                transferId = "abcdefab-1234-1234-1234-abcdefabcdef",
+            ) as Map<*, *>
+
+        assertEquals("uploaded", result["operation"])
+        assertEquals(1, uploads)
+        assertTrue(Files.list(workspacePath).use { paths -> paths.noneMatch { it.fileName.toString().startsWith(".cnb-upload-") } })
+    }
+
+    @Test
+    fun `upload comparison accepts a fresh digest sink on each transport retry`() {
+        val workspacePath = temporaryDirectory.resolve("digest-retry")
+        Files.createDirectories(workspacePath)
+        Files.writeString(workspacePath.resolve("plugin.hpi"), "plugin")
+        var uploads = 0
+        val client =
+            client(
+                mapOf(
+                    "getRelease" to {
+                        CnbRelease(
+                            id = "release-1",
+                            tagName = "v1.0.0",
+                            assets = listOf(CnbReleaseAsset("asset-1", "plugin.hpi", "plugin.hpi", 6)),
+                        )
+                    },
+                    "downloadReleaseAsset" to { args ->
+                        val target = requireNotNull(args)[3] as CnbDownloadTarget
+                        target.openStream().use { it.write("partial".toByteArray()) }
+                        target.openStream().use { it.write("plugin".toByteArray()) }
+                        CnbReleaseAssetDownload(6, "application/octet-stream")
+                    },
+                    "uploadReleaseAsset" to {
+                        uploads++
+                        Unit
+                    },
+                ),
+            )
+
+        CnbReleaseWorkspaceTransfer.upload(
+            uploadRequest("plugin.hpi"),
+            context,
+            client,
+            FilePath(workspacePath.toFile()),
+            resumed = true,
+        )
+
+        assertEquals(0, uploads)
+    }
+
+    @Test
+    fun `upload retains one immutable snapshot until checkpoint cleanup`() {
+        val workspacePath = temporaryDirectory.resolve("checkpointed-upload")
+        Files.createDirectories(workspacePath)
+        val source = workspacePath.resolve("plugin.hpi")
+        Files.writeString(source, "first")
+        val transferId = "12345678-1234-1234-1234-123456789abc"
+        var remoteBytes: ByteArray? = null
+        var uploads = 0
+        val client =
+            client(
+                mapOf(
+                    "uploadReleaseAsset" to { args ->
+                        uploads++
+                        remoteBytes = (requireNotNull(args)[3] as CnbRepeatableInput).openStream().use { it.readAllBytes() }
+                    },
+                    "getRelease" to { releaseWithAsset(remoteBytes) },
+                ),
+            )
+        val workspace = FilePath(workspacePath.toFile())
+
+        CnbReleaseWorkspaceTransfer.upload(
+            uploadRequest("plugin.hpi"),
+            context,
+            client,
+            workspace,
+            transferId = transferId,
+            retainSnapshotUntilCheckpoint = true,
+        )
+        Files.delete(source)
+        CnbReleaseWorkspaceTransfer.upload(
+            uploadRequest("plugin.hpi"),
+            context,
+            client,
+            workspace,
+            transferId = transferId,
+            resumed = true,
+            retainSnapshotUntilCheckpoint = true,
+        )
+
+        assertEquals(1, uploads)
+        assertEquals("first", remoteBytes?.decodeToString())
+        assertTrue(Files.exists(workspacePath.resolve(".cnb-upload-$transferId.snapshot")))
+        CnbReleaseWorkspaceTransfer.cleanupUploadSnapshot(workspace, CnbWorkspaceRelativePath.parse("plugin.hpi"), transferId)
+        assertFalse(Files.exists(workspacePath.resolve(".cnb-upload-$transferId.snapshot")))
+    }
+
+    @Test
     fun `upload rejects directories and symbolic links without calling CNB`() {
         val workspacePath = temporaryDirectory.resolve("workspace")
         val outside = temporaryDirectory.resolve("outside.hpi")
@@ -195,7 +569,7 @@ class CnbReleaseWorkspaceStepsTest {
     }
 
     @Test
-    fun `download writes a random same-directory temporary then atomically publishes metadata`() {
+    fun `download writes a stable same-directory temporary then atomically publishes metadata`() {
         val workspacePath = temporaryDirectory.resolve("jenkins-download/workspace/job")
         val payload = "release-asset".toByteArray(StandardCharsets.UTF_8)
         var suppliedLimit = 0L
@@ -226,7 +600,44 @@ class CnbReleaseWorkspaceStepsTest {
     }
 
     @Test
-    fun `download never overwrites implicitly and only replaces an explicit regular target`() {
+    fun `download interrupted after transfer never publishes and removes its temporary`() {
+        listOf(false, true).forEachIndexed { index, destinationExists ->
+            val workspacePath = temporaryDirectory.resolve("interrupted-download-$index")
+            Files.createDirectories(workspacePath)
+            val destination = workspacePath.resolve("plugin.hpi")
+            if (destinationExists) Files.writeString(destination, "old")
+            val client =
+                downloadClient { _, target ->
+                    target.openStream().use { it.write("new".toByteArray()) }
+                    Thread.currentThread().interrupt()
+                    CnbReleaseAssetDownload(3, "application/octet-stream")
+                }
+
+            try {
+                assertThrows(InterruptedException::class.java) {
+                    CnbReleaseWorkspaceTransfer.download(
+                        downloadRequest("plugin.hpi", overwrite = destinationExists),
+                        context,
+                        client,
+                        FilePath(workspacePath.toFile()),
+                    )
+                }
+                assertTrue(Thread.currentThread().isInterrupted)
+            } finally {
+                Thread.interrupted()
+            }
+
+            if (destinationExists) {
+                assertEquals("old", Files.readString(destination))
+            } else {
+                assertFalse(Files.exists(destination, LinkOption.NOFOLLOW_LINKS))
+            }
+            assertTrue(downloadTemporaries(workspacePath).isEmpty())
+        }
+    }
+
+    @Test
+    fun `download never overwrites different content implicitly and only replaces an explicit regular target`() {
         val workspacePath = temporaryDirectory.resolve("workspace")
         Files.createDirectories(workspacePath)
         val destination = workspacePath.resolve("plugin.hpi")
@@ -248,7 +659,7 @@ class CnbReleaseWorkspaceStepsTest {
             )
         }
         assertEquals("old", Files.readString(destination))
-        assertEquals(0, calls)
+        assertEquals(1, calls)
 
         CnbReleaseWorkspaceTransfer.download(
             downloadRequest("plugin.hpi", overwrite = true),
@@ -257,7 +668,37 @@ class CnbReleaseWorkspaceStepsTest {
             FilePath(workspacePath.toFile()),
         )
         assertEquals("new", Files.readString(destination))
+        assertEquals(2, calls)
+    }
+
+    @Test
+    fun `new download execution converges with content published before checkpoint failure`() {
+        val workspacePath = temporaryDirectory.resolve("download-after-checkpoint-failure")
+        Files.createDirectories(workspacePath)
+        val destination = workspacePath.resolve("plugin.hpi")
+        Files.writeString(destination, "release-asset")
+        var calls = 0
+        val client =
+            downloadClient { _, target ->
+                calls++
+                target.openStream().use { it.write("release-asset".toByteArray()) }
+                CnbReleaseAssetDownload(13, "application/octet-stream", "etag-1")
+            }
+
+        val result =
+            CnbReleaseWorkspaceTransfer.download(
+                downloadRequest("plugin.hpi"),
+                context,
+                client,
+                FilePath(workspacePath.toFile()),
+                transferId = "abcdefab-1234-1234-1234-abcdefabcdef",
+                resumed = false,
+            ) as Map<*, *>
+
+        assertEquals("downloaded", result["operation"])
+        assertEquals("release-asset", Files.readString(destination))
         assertEquals(1, calls)
+        assertTrue(downloadTemporaries(workspacePath).isEmpty())
     }
 
     @Test
@@ -301,6 +742,50 @@ class CnbReleaseWorkspaceStepsTest {
         }
         assertEquals("release-asset", Files.readString(destination))
         assertTrue(downloadTemporaries(workspacePath).isEmpty())
+    }
+
+    @Test
+    fun `resumed download reuses and publishes its stable orphan temporary`() {
+        val workspacePath = temporaryDirectory.resolve("orphan-download")
+        Files.createDirectories(workspacePath)
+        val transferId = "12345678-1234-1234-1234-123456789abc"
+        val orphan = workspacePath.resolve(".cnb-release-download-$transferId.tmp")
+        Files.writeString(orphan, "partial bytes from interrupted controller")
+        val client =
+            downloadClient { _, target ->
+                target.openStream().use { it.write("complete".toByteArray()) }
+                CnbReleaseAssetDownload(8, "application/octet-stream")
+            }
+
+        CnbReleaseWorkspaceTransfer.download(
+            downloadRequest("plugin.hpi"),
+            context,
+            client,
+            FilePath(workspacePath.toFile()),
+            transferId = transferId,
+            resumed = true,
+        )
+
+        assertEquals("complete", Files.readString(workspacePath.resolve("plugin.hpi")))
+        assertFalse(Files.exists(orphan, LinkOption.NOFOLLOW_LINKS))
+        assertTrue(downloadTemporaries(workspacePath).isEmpty())
+    }
+
+    @Test
+    fun `stopped download cleanup removes its stable temporary idempotently`() {
+        val workspacePath = temporaryDirectory.resolve("stopped-download")
+        val downloadDirectory = workspacePath.resolve("downloads")
+        Files.createDirectories(downloadDirectory)
+        val transferId = "12345678-1234-1234-1234-123456789abc"
+        val temporary = downloadDirectory.resolve(".cnb-release-download-$transferId.tmp")
+        Files.writeString(temporary, "partial")
+        val workspace = FilePath(workspacePath.toFile())
+        val path = CnbWorkspaceRelativePath.parse("downloads/plugin.hpi")
+
+        CnbReleaseWorkspaceTransfer.cleanupDownloadTemporary(workspace, path, transferId)
+        CnbReleaseWorkspaceTransfer.cleanupDownloadTemporary(workspace, path, transferId)
+
+        assertFalse(Files.exists(temporary, LinkOption.NOFOLLOW_LINKS))
     }
 
     @Test
@@ -521,6 +1006,25 @@ class CnbReleaseWorkspaceStepsTest {
     }
 
     private fun ByteArray.toHex(): String = joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+
+    private fun releaseWithAsset(bytes: ByteArray?): CnbRelease =
+        CnbRelease(
+            id = "release-1",
+            tagName = "v1.0.0",
+            assets =
+                bytes?.let {
+                    listOf(
+                        CnbReleaseAsset(
+                            id = "asset-1",
+                            name = "plugin.hpi",
+                            path = "plugin.hpi",
+                            size = it.size.toLong(),
+                            hashAlgorithm = "sha256",
+                            hashValue = MessageDigest.getInstance("SHA-256").digest(it).toHex(),
+                        ),
+                    )
+                }.orEmpty(),
+        )
 
     @Suppress("UNCHECKED_CAST")
     private fun client(handlers: Map<String, (Array<out Any?>?) -> Any?>): CnbClient =

@@ -17,6 +17,7 @@ import org.kohsuke.stapler.DataBoundSetter
 import java.io.Serializable
 import java.util.ArrayList
 import java.util.LinkedHashMap
+import java.util.UUID
 
 abstract class CnbBuildDetailStep : CnbContextAwareStep() {
     internal fun buildDetailExecution(
@@ -163,7 +164,10 @@ private class CnbBuildDetailTransferExecution(
     private val supplied: CnbRunContextInput,
     private val request: CnbBuildDetailRequest.DownloadRunnerLog,
     context: StepContext,
+    transferId: String? = UUID.randomUUID().toString(),
 ) : CnbRestartableAsyncStepExecution<Any>(context, "CNB build runner log transfer") {
+    private var transferId: String? = transferId
+
     override fun runAttempt(
         attempt: Int,
         resumed: Boolean,
@@ -176,10 +180,31 @@ private class CnbBuildDetailTransferExecution(
         val environment = context.get(EnvVars::class.java)
         val resolved = CnbRunContextResolver.resolve(run, listener, supplied, environment)
         val workspace = context.get(FilePath::class.java)
+        val currentTransferId = stableTransferId()
         return resolved.client(run).use { client ->
-            CnbBuildDetailDispatcher.execute(request, resolved, client, workspace, resumed)
+            CnbBuildDetailDispatcher.execute(
+                request,
+                resolved,
+                client,
+                workspace,
+                transferId = currentTransferId,
+                resumed = resumed,
+            )
         }
     }
+
+    override fun afterUnsuccessfulCompletion() {
+        CnbReleaseWorkspaceTransfer.cleanupDownloadTemporary(
+            context.get(FilePath::class.java),
+            request.path,
+            stableTransferId(),
+        )
+    }
+
+    private fun stableTransferId(): String =
+        synchronized(this) {
+            transferId ?: UUID.randomUUID().toString().also { transferId = it }
+        }
 
     companion object {
         private const val serialVersionUID = 1L
@@ -192,6 +217,7 @@ internal object CnbBuildDetailDispatcher {
         context: CnbRunContext,
         client: CnbClient,
         workspace: FilePath? = null,
+        transferId: String = UUID.randomUUID().toString(),
         resumed: Boolean = false,
     ): Any =
         when (request) {
@@ -216,7 +242,8 @@ internal object CnbBuildDetailDispatcher {
                         request.overwrite,
                         request.limit,
                         "CNB build runner log was not found",
-                        resumed,
+                        transferId = transferId,
+                        resumed = resumed,
                     ) { target ->
                         client
                             .downloadBuildRunnerLog(

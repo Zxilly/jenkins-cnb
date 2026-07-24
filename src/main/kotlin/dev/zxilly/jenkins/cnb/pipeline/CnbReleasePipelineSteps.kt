@@ -658,8 +658,41 @@ private class CnbReleaseTransferStepExecution(
         val resolved = CnbRunContextResolver.resolve(run, listener, supplied, environment)
         val workspace = context.get(FilePath::class.java)
         return resolved.client(run).use { client ->
-            CnbReleaseStepDispatcher.execute(request, resolved, client, workspace, transferId, resumed)
+            CnbReleaseStepDispatcher.execute(
+                request,
+                resolved,
+                client,
+                workspace,
+                transferId = transferId,
+                resumed = resumed,
+            )
         }
+    }
+
+    override fun afterCheckpoint(value: Any?) {
+        cleanupUploadTransfer()
+    }
+
+    override fun afterUnsuccessfulCompletion() {
+        val workspace = context.get(FilePath::class.java)
+        when (val current = request) {
+            is CnbReleaseStepRequest.UploadAsset ->
+                CnbReleaseWorkspaceTransfer.cleanupUploadSnapshot(workspace, current.workspacePath, transferId)
+
+            is CnbReleaseStepRequest.DownloadAsset ->
+                CnbReleaseWorkspaceTransfer.cleanupDownloadTemporary(workspace, current.workspacePath, transferId)
+
+            else -> Unit
+        }
+    }
+
+    private fun cleanupUploadTransfer() {
+        val upload = request as? CnbReleaseStepRequest.UploadAsset ?: return
+        CnbReleaseWorkspaceTransfer.cleanupUploadSnapshot(
+            context.get(FilePath::class.java),
+            upload.workspacePath,
+            transferId,
+        )
     }
 
     companion object {
@@ -752,8 +785,9 @@ internal object CnbReleaseStepDispatcher {
                     context,
                     client,
                     workspace ?: throw AbortException("CNB release asset upload requires a Jenkins workspace"),
-                    transferId,
-                    resumed,
+                    transferId = transferId,
+                    resumed = resumed,
+                    retainSnapshotUntilCheckpoint = true,
                 )
             }
 
@@ -763,7 +797,8 @@ internal object CnbReleaseStepDispatcher {
                     context,
                     client,
                     workspace ?: throw AbortException("CNB release asset download requires a Jenkins workspace"),
-                    resumed,
+                    transferId = transferId,
+                    resumed = resumed,
                 )
             }
         }
