@@ -8,6 +8,7 @@ on:
   schedule:
     - cron: "17 3 * * 1"
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   security-events: write
@@ -75,7 +76,11 @@ jobs:
       - name: Process SARIF
         shell: bash
         run: |
-          jq 'setpath(path(.runs[].tool.driver.name); "Jenkins Security Scan") | setpath(path(.runs[].tool.driver.organization); "Jenkins Project") | del(.runs[].results[] | select( .suppressions | length != 0 ))' ../results/java.sarif > jenkins-security-scan.sarif
+          jq '
+            (.runs[]?.tool.driver.name) = "Jenkins Security Scan"
+            | (.runs[]?.tool.driver.organization) = "Jenkins Project"
+            | (.runs[]?.results) |= map(select(((.suppressions // []) | length) == 0))
+          ' ../results/java.sarif > jenkins-security-scan.sarif
           mv -v ../results/java.sarif .
 
       - name: Archive SARIF
@@ -90,3 +95,14 @@ jobs:
         with:
           sarif_file: jenkins-security-scan.sarif
           category: Jenkins Security Scan
+
+      - name: Require no unsuppressed findings
+        shell: bash
+        run: |
+          finding_count="$(jq '[.runs[]?.results[]?] | length' jenkins-security-scan.sarif)"
+          if [[ "$finding_count" -ne 0 ]]; then
+            jq -r '.runs[]?.results[]? | "\(.ruleId // "unknown-rule"): \(.message.text // "CodeQL finding")"' \
+              jenkins-security-scan.sarif >&2
+            echo "Jenkins Security Scan found $finding_count unsuppressed result(s)." >&2
+            exit 1
+          fi
