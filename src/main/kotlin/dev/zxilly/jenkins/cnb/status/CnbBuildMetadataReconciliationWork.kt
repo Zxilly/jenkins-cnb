@@ -9,6 +9,7 @@ import hudson.model.Queue
 import hudson.model.Run
 import hudson.model.TaskListener
 import jenkins.model.Jenkins
+import java.io.IOException
 import java.lang.ref.WeakReference
 import java.time.Duration
 import java.util.concurrent.ConcurrentSkipListMap
@@ -19,7 +20,8 @@ import java.util.logging.Logger
 /**
  * Bounded loss recovery for durable metadata Actions that could not enter the in-memory dispatcher.
  * One startup round is performed; after that, the task sleeps unless an overflow requests a new
- * generation. Lazy item traversal and a single Run cursor avoid materializing all jobs or builds.
+ * generation. Lazy traversal with retained cancellation, Job, and Run cursors avoids materializing
+ * controller history.
  */
 @Extension
 class CnbBuildMetadataReconciliationWork : AsyncPeriodicWork("CNB build metadata reconciliation") {
@@ -28,6 +30,8 @@ class CnbBuildMetadataReconciliationWork : AsyncPeriodicWork("CNB build metadata
     private var currentQueueItem: Queue.Item? = null
     private var currentQueueActions: Iterator<CnbBuildMetadataAction>? = null
     private var queueComplete = true
+    private var cancelledIterator: Iterator<CnbCancelledBuildMetadataRecord>? = null
+    private var cancelledComplete = true
     private var jobIterator: Iterator<Job<*, *>>? = null
     private var currentRun: Run<*, *>? = null
     private var currentRunActionOwner: Run<*, *>? = null
@@ -41,26 +45,69 @@ class CnbBuildMetadataReconciliationWork : AsyncPeriodicWork("CNB build metadata
     override fun execute(listener: TaskListener) {
         val jenkins = Jenkins.get()
         if (jenkins.isQuietingDown || jenkins.isTerminating) return
+        val cancelledStore = CnbCancelledBuildMetadataStores.current(jenkins)
 
         val stats =
             recoverOnce(
                 recoveryRequests = CNB_BUILD_METADATA_RECOVERY_REQUESTS,
                 queueItems = CNB_BUILD_METADATA_QUEUE_RECOVERY_INDEX::snapshotIterator,
+                cancelledRecords = cancelledStore::snapshotIterator,
                 jobs = { Items.allItems(jenkins, Job::class.java).iterator() },
                 scheduleQueue = { item, action ->
                     CnbBuildMetadataDispatcher.schedule(item.task as? Item, action)
+                },
+                scheduleCancelled = { record ->
+                    scheduleCancelledRecord(jenkins, cancelledStore, record)
                 },
                 scheduleRun = CnbBuildMetadataDispatcher::schedule,
             )
         if (stats.accepted > 0) {
             listener.logger.printf(
-                "CNB metadata recovery generation %d requeued %d durable Action(s); inspected %d queue item(s), %d job(s), and %d run(s)%n",
+                "CNB metadata recovery generation %d requeued %d durable Action(s); inspected %d queue item(s), %d cancelled record(s), %d job(s), and %d run(s)%n",
                 stats.generation,
                 stats.accepted,
                 stats.queueItemsInspected,
+                stats.cancelledRecordsInspected,
                 stats.jobsInspected,
                 stats.runsInspected,
             )
+        }
+    }
+
+    internal fun scheduleCancelledRecord(
+        jenkins: Jenkins,
+        store: CnbCancelledBuildMetadataStore,
+        record: CnbCancelledBuildMetadataRecord,
+        schedule: (Item?, CnbCancelledBuildMetadataRecord, CnbCancelledBuildMetadataStore) -> Boolean =
+            CnbBuildMetadataDispatcher::schedulePersisted,
+    ): Boolean {
+        val resolution = store.resolveCredentialContext(record, jenkins)
+        return when (resolution.state) {
+            CnbCancelledBuildMetadataCredentialResolution.State.AVAILABLE -> {
+                schedule(resolution.item, record, store)
+            }
+
+            CnbCancelledBuildMetadataCredentialResolution.State.MISSING -> {
+                false
+            }
+
+            CnbCancelledBuildMetadataCredentialResolution.State.DELETED -> {
+                discardUnresolvableRecord(store, record, "credential context was deleted or invalid")
+                false
+            }
+        }
+    }
+
+    private fun discardUnresolvableRecord(
+        store: CnbCancelledBuildMetadataStore,
+        record: CnbCancelledBuildMetadataRecord,
+        reason: String,
+    ) {
+        try {
+            store.remove(record)
+            LOGGER.warning("Discarded a pending CNB metadata report because its $reason")
+        } catch (failure: IOException) {
+            LOGGER.log(Level.WARNING, "Could not discard an unresolvable CNB metadata report", failure)
         }
     }
 
@@ -68,15 +115,21 @@ class CnbBuildMetadataReconciliationWork : AsyncPeriodicWork("CNB build metadata
     internal fun recoverOnce(
         recoveryRequests: CnbBuildMetadataRecoveryGate,
         queueItems: () -> Iterator<Queue.Item>,
+        cancelledRecords: () -> Iterator<CnbCancelledBuildMetadataRecord> = {
+            emptyList<CnbCancelledBuildMetadataRecord>().iterator()
+        },
         jobs: () -> Iterator<Job<*, *>>,
         maximumQueueItems: Int = MAX_QUEUE_ITEMS_PER_EXECUTION,
+        maximumCancelledRecords: Int = MAX_CANCELLED_RECORDS_PER_EXECUTION,
         maximumJobs: Int = MAX_JOBS_PER_EXECUTION,
         maximumRuns: Int = MAX_RUNS_PER_EXECUTION,
         maximumActions: Int = MAX_ACTIONS_PER_EXECUTION,
         scheduleQueue: (Queue.Item, CnbBuildMetadataAction) -> Boolean,
+        scheduleCancelled: (CnbCancelledBuildMetadataRecord) -> Boolean = { false },
         scheduleRun: (Run<*, *>, CnbBuildMetadataAction) -> Boolean,
     ): RecoveryTickStats {
         require(maximumQueueItems > 0) { "maximumQueueItems must be positive" }
+        require(maximumCancelledRecords > 0) { "maximumCancelledRecords must be positive" }
         require(maximumJobs > 0) { "maximumJobs must be positive" }
         require(maximumRuns > 0) { "maximumRuns must be positive" }
         require(maximumActions > 0) { "maximumActions must be positive" }
@@ -84,7 +137,7 @@ class CnbBuildMetadataReconciliationWork : AsyncPeriodicWork("CNB build metadata
         val generation = roundGeneration ?: recoveryRequests.pendingGeneration() ?: return RecoveryTickStats.idle()
         return try {
             if (roundGeneration == null) {
-                beginRound(generation, queueItems(), jobs())
+                beginRound(generation, queueItems(), cancelledRecords(), jobs())
             }
             val queueStats =
                 if (queueComplete) {
@@ -93,22 +146,30 @@ class CnbBuildMetadataReconciliationWork : AsyncPeriodicWork("CNB build metadata
                     reconcileQueue(maximumQueueItems, maximumActions, scheduleQueue)
                 }
             val remainingActions = maximumActions - queueStats.actionsInspected
+            val cancelledStats =
+                if (cancelledComplete || remainingActions == 0) {
+                    ReconciliationStats(0, 0, 0)
+                } else {
+                    reconcileCancelled(maximumCancelledRecords, remainingActions, scheduleCancelled)
+                }
+            val remainingRunActions = remainingActions - cancelledStats.actionsInspected
             val runStats =
-                if (remainingActions == 0) {
+                if (remainingRunActions == 0) {
                     RunReconciliationStats(0, 0, 0, 0)
                 } else {
-                    reconcileRuns(maximumJobs, maximumRuns, remainingActions, scheduleRun)
+                    reconcileRuns(maximumJobs, maximumRuns, remainingRunActions, scheduleRun)
                 }
-            val completed = queueComplete && jobsComplete
+            val completed = queueComplete && cancelledComplete && jobsComplete
             val requestCleared = completed && recoveryRequests.completeIfUnchanged(generation)
             if (completed) resetRound()
             RecoveryTickStats(
                 generation = generation,
                 queueItemsInspected = queueStats.inspected,
+                cancelledRecordsInspected = cancelledStats.inspected,
                 jobsInspected = runStats.jobsInspected,
                 runsInspected = runStats.runsInspected,
-                actionsInspected = queueStats.actionsInspected + runStats.actionsInspected,
-                accepted = queueStats.accepted + runStats.accepted,
+                actionsInspected = queueStats.actionsInspected + cancelledStats.actionsInspected + runStats.actionsInspected,
+                accepted = queueStats.accepted + cancelledStats.accepted + runStats.accepted,
                 roundCompleted = completed,
                 requestCleared = requestCleared,
             )
@@ -129,6 +190,7 @@ class CnbBuildMetadataReconciliationWork : AsyncPeriodicWork("CNB build metadata
     private fun beginRound(
         generation: Long,
         queueItems: Iterator<Queue.Item>,
+        cancelledRecords: Iterator<CnbCancelledBuildMetadataRecord>,
         jobs: Iterator<Job<*, *>>,
     ) {
         roundGeneration = generation
@@ -137,6 +199,9 @@ class CnbBuildMetadataReconciliationWork : AsyncPeriodicWork("CNB build metadata
         currentQueueActions = null
         queueComplete = !queueItems.hasNext()
         if (queueComplete) queueIterator = null
+        cancelledIterator = cancelledRecords
+        cancelledComplete = !cancelledRecords.hasNext()
+        if (cancelledComplete) cancelledIterator = null
         jobIterator = jobs
         currentRun = null
         currentRunActionOwner = null
@@ -183,11 +248,31 @@ class CnbBuildMetadataReconciliationWork : AsyncPeriodicWork("CNB build metadata
         return ReconciliationStats(inspected, actionsInspected, accepted)
     }
 
+    private fun reconcileCancelled(
+        maximumRecords: Int,
+        maximumActions: Int,
+        schedule: (CnbCancelledBuildMetadataRecord) -> Boolean,
+    ): ReconciliationStats {
+        val iterator = cancelledIterator ?: return ReconciliationStats(0, 0, 0)
+        var inspected = 0
+        var accepted = 0
+        while (inspected < maximumRecords && inspected < maximumActions && iterator.hasNext()) {
+            val record = iterator.next()
+            inspected++
+            if (schedule(record)) accepted++
+        }
+        if (!iterator.hasNext()) {
+            cancelledComplete = true
+            cancelledIterator = null
+        }
+        return ReconciliationStats(inspected, inspected, accepted)
+    }
+
     private fun reconcileRuns(
         maximumJobs: Int,
         maximumRuns: Int,
         maximumActions: Int,
-        schedule: (Run<*, *>, CnbBuildMetadataAction) -> Boolean,
+        scheduleRun: (Run<*, *>, CnbBuildMetadataAction) -> Boolean,
     ): RunReconciliationStats {
         if (jobsComplete) return RunReconciliationStats(0, 0, 0, 0)
         var jobsInspected = if (currentRun == null && currentRunActionOwner == null) 0 else 1
@@ -200,12 +285,11 @@ class CnbBuildMetadataReconciliationWork : AsyncPeriodicWork("CNB build metadata
             if (actionOwner != null && actions != null && actions.hasNext()) {
                 val action = actions.next()
                 actionsInspected++
-                if (action.isPending() && schedule(actionOwner, action)) accepted++
+                if (action.isPending() && scheduleRun(actionOwner, action)) accepted++
                 continue
             }
             currentRunActionOwner = null
             currentRunActions = null
-            if (runsInspected >= maximumRuns) break
 
             var run = currentRun
             if (run == null) {
@@ -220,7 +304,7 @@ class CnbBuildMetadataReconciliationWork : AsyncPeriodicWork("CNB build metadata
                 jobsInspected++
                 run = job.lastBuild ?: continue
             }
-
+            if (runsInspected >= maximumRuns) break
             currentRun = run.previousBuild
             runsInspected++
             currentRunActionOwner = run
@@ -239,6 +323,8 @@ class CnbBuildMetadataReconciliationWork : AsyncPeriodicWork("CNB build metadata
         currentQueueItem = null
         currentQueueActions = null
         queueComplete = true
+        cancelledIterator = null
+        cancelledComplete = true
         jobIterator = null
         currentRun = null
         currentRunActionOwner = null
@@ -262,6 +348,7 @@ class CnbBuildMetadataReconciliationWork : AsyncPeriodicWork("CNB build metadata
     internal data class RecoveryTickStats(
         val generation: Long = 0,
         val queueItemsInspected: Int = 0,
+        val cancelledRecordsInspected: Int = 0,
         val jobsInspected: Int = 0,
         val runsInspected: Int = 0,
         val actionsInspected: Int = 0,
@@ -277,6 +364,7 @@ class CnbBuildMetadataReconciliationWork : AsyncPeriodicWork("CNB build metadata
     companion object {
         private val RECURRENCE = Duration.ofMinutes(1)
         private const val MAX_QUEUE_ITEMS_PER_EXECUTION = 512
+        private const val MAX_CANCELLED_RECORDS_PER_EXECUTION = 512
         private const val MAX_JOBS_PER_EXECUTION = 256
         private const val MAX_RUNS_PER_EXECUTION = 1024
         private const val MAX_ACTIONS_PER_EXECUTION = 1024

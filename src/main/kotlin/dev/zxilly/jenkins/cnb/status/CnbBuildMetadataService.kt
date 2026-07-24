@@ -180,13 +180,41 @@ internal object CnbBuildMetadataService {
         val taskItem = item.task as? Item
         if (!CnbBranchSourceReportingPolicy.forItem(taskItem).automaticReportingEnabled) return
         val action = item.getAction(CnbBuildMetadataAction::class.java) ?: return
-        action.advance(
-            action.target(),
-            CnbBuildMetadataState.ABORTED,
-            "${item.task.name} (cancelled)",
-            absoluteUrl(item.url),
-        )
-        CnbBuildMetadataDispatcher.schedule(taskItem, action)
+        if (taskItem == null) {
+            action.advance(
+                action.target(),
+                CnbBuildMetadataState.ABORTED,
+                "${item.task.name} (cancelled)",
+                absoluteUrl(item.url),
+            )
+            CnbBuildMetadataDispatcher.schedule(null, action)
+            return
+        }
+        try {
+            val store = CnbCancelledBuildMetadataStores.current()
+            val retained =
+                synchronized(action) {
+                    action.advance(
+                        action.target(),
+                        CnbBuildMetadataState.ABORTED,
+                        "${item.task.name} (cancelled)",
+                        absoluteUrl(item.url),
+                    )
+                    store.retain(taskItem, action)
+                }
+            CnbBuildMetadataDispatcher.schedulePersisted(
+                retained.credentialContext,
+                retained.record,
+                store,
+                initialPersistenceRequired = !retained.initiallyPersisted,
+            )
+        } catch (failure: Exception) {
+            LOGGER.log(
+                Level.WARNING,
+                "Unable to retain cancelled CNB build metadata (${failure.javaClass.simpleName})",
+            )
+            CnbBuildMetadataDispatcher.schedule(taskItem, action)
+        }
     }
 
     fun configurationOf(publisher: CnbBuildMetadataPublisher): CnbBuildMetadataConfiguration =

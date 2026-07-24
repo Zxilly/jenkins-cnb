@@ -9,7 +9,8 @@ import java.security.SecureRandom
 /**
  * Durable state for asynchronous CNB metadata reconciliation.
  *
- * The action is attached while queued, copied to the Run by Jenkins, and persisted in build.xml.
+ * The action is attached while queued and normally copied to the Run for build.xml persistence.
+ * A cancelled queue item parks the same action in the plugin's controller-local state store.
  * No token or secret is stored here; a Jenkins credentials ID is only an opaque reference.
  */
 class CnbBuildMetadataAction(
@@ -30,6 +31,9 @@ class CnbBuildMetadataAction(
 
     @Transient
     private var owner: Run<*, *>? = null
+
+    @Transient
+    private var itemPersistenceBlocked: Boolean = false
 
     @Synchronized
     internal fun configure(configuration: CnbBuildMetadataConfiguration?) {
@@ -53,6 +57,22 @@ class CnbBuildMetadataAction(
 
     @Synchronized
     internal fun state(): CnbBuildMetadataState = desiredState
+
+    @Synchronized
+    internal fun version(): Long = desiredVersion
+
+    @Synchronized
+    internal fun requireItemPersistence() {
+        itemPersistenceBlocked = true
+    }
+
+    @Synchronized
+    internal fun releaseItemPersistence() {
+        itemPersistenceBlocked = false
+    }
+
+    @Synchronized
+    internal fun itemPersistenceRequired(): Boolean = itemPersistenceBlocked
 
     /** Advances monotonically from queued to running to a terminal state. */
     @Synchronized
@@ -87,6 +107,7 @@ class CnbBuildMetadataAction(
 
     @Synchronized
     internal fun snapshot(): CnbBuildMetadataSnapshot? {
+        if (itemPersistenceBlocked) return null
         val target = resolvedTarget ?: return null
         if (reportedVersion >= desiredVersion) return null
         return CnbBuildMetadataSnapshot(

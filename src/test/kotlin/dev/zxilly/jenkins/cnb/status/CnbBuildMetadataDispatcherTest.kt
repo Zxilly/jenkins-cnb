@@ -1,14 +1,19 @@
 package dev.zxilly.jenkins.cnb.status
 
+import com.cloudbees.hudson.plugins.folder.Folder
 import dev.zxilly.jenkins.cnb.api.CnbApiException
 import dev.zxilly.jenkins.cnb.health.CnbHealthComponent
 import dev.zxilly.jenkins.cnb.health.CnbOperationalHealth
+import hudson.XmlFile
 import hudson.model.Item
+import jenkins.model.Jenkins
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNotSame
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertSame
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.jvnet.hudson.test.JenkinsRule
@@ -28,6 +33,20 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 class CnbBuildMetadataDispatcherTest {
+    @Test
+    @WithJenkins
+    fun `cancelled metadata store rejects an unexpected XML root`(jenkins: JenkinsRule) {
+        val path =
+            jenkins.jenkins.rootDir
+                .toPath()
+                .resolve("invalid-cancelled-metadata.xml")
+        XmlFile(Jenkins.XSTREAM2, path.toFile()).write("not a cancelled metadata store")
+
+        assertThrows(IOException::class.java) {
+            CnbCancelledBuildMetadataStore(path, requestRecovery = {})
+        }
+    }
+
     @Test
     fun `reporting retries record every failure and a later success resolves health`() {
         val action = pendingAction("health-retry")
@@ -737,7 +756,295 @@ class CnbBuildMetadataPersistenceTest {
         assertTrue(requireNotNull(run.getAction(CnbBuildMetadataAction::class.java)).isPending())
     }
 
-    private fun pendingRunAction(identity: String): CnbBuildMetadataAction {
+    @Test
+    fun `cancelled item acknowledgement save failure restores durable action and retries`(jenkins: JenkinsRule) {
+        val project = jenkins.createFreeStyleProject("metadata-cancel-save-retry")
+        val action = pendingRunAction("cancel-save-retry", CnbBuildMetadataState.ABORTED)
+        var writes = 0
+        val store =
+            cancelledStore(jenkins, "cancel-save-retry") {
+                writes++
+                if (writes == 2) throw IOException("injected cancellation store failure")
+            }
+        val retained = store.retain(project, action)
+        assertSame(action, retained.record.action)
+        val clock = TestClock()
+        val workers = TestExecutor()
+        val wakeups = TestWakeups(clock)
+        val knownCommentIds = mutableListOf<String?>()
+        var reportedContext: Item? = null
+        val runtime =
+            CnbBuildMetadataDispatchRuntime(
+                workers = workers,
+                wakeups = wakeups,
+                reporter =
+                    CnbMetadataReporter { snapshot, context ->
+                        reportedContext = context
+                        knownCommentIds += snapshot.knownCommentId
+                        CnbBuildMetadataReportResult("cancel-comment-1")
+                    },
+                clockMillis = clock::now,
+            )
+
+        assertTrue(runtime.schedulePersistedItem(project, retained.record, store))
+        workers.runNext()
+
+        assertTrue(action.isPending())
+        assertEquals(1, store.size())
+        assertEquals(1, runtime.pendingCount())
+        assertEquals(1_000L, wakeups.singleActive().delayMillis)
+
+        clock.advance(1_000)
+        wakeups.runDue()
+        workers.runNext()
+
+        assertEquals(0, store.size())
+        assertEquals(listOf(null, "cancel-comment-1"), knownCommentIds)
+        assertSame(project, reportedContext)
+        assertEquals(3, writes)
+        assertFalse(reloadedStore(jenkins, "cancel-save-retry").snapshotIterator().hasNext())
+        runtime.shutdown()
+    }
+
+    @Test
+    fun `initial cancelled item save failure blocks reporting until persistence retry succeeds`(jenkins: JenkinsRule) {
+        val project = jenkins.createFreeStyleProject("metadata-cancel-initial-save")
+        val action = pendingRunAction("cancel-initial-save", CnbBuildMetadataState.ABORTED)
+        var writes = 0
+        val store =
+            cancelledStore(jenkins, "cancel-initial-save") {
+                writes++
+                if (writes <= 2) throw IOException("injected initial persistence failure")
+            }
+        val retained = store.retain(project, action)
+        assertFalse(retained.initiallyPersisted)
+        assertNull(action.snapshot(), "the failed local barrier must hide the reportable snapshot")
+        val clock = TestClock()
+        val workers = TestExecutor()
+        val wakeups = TestWakeups(clock)
+        var reports = 0
+        val runtime =
+            CnbBuildMetadataDispatchRuntime(
+                workers = workers,
+                wakeups = wakeups,
+                reporter =
+                    CnbMetadataReporter { _, _ ->
+                        reports++
+                        CnbBuildMetadataReportResult("cancel-initial-comment")
+                    },
+                clockMillis = clock::now,
+            )
+
+        assertTrue(runtime.schedulePersistedItem(project, retained.record, store))
+        workers.runNext()
+
+        assertEquals(0, reports)
+        assertEquals(2, writes)
+        assertTrue(action.isPending())
+        assertNull(action.snapshot())
+        assertEquals(1, runtime.pendingCount())
+
+        clock.advance(1_000)
+        wakeups.runDue()
+        workers.runNext()
+
+        assertEquals(1, reports)
+        assertEquals(4, writes)
+        assertEquals(0, store.size())
+        assertFalse(reloadedStore(jenkins, "cancel-initial-save").snapshotIterator().hasNext())
+        runtime.shutdown()
+    }
+
+    @Test
+    fun `deleted credential context invalidates persisted work before it reports`(jenkins: JenkinsRule) {
+        val folder = jenkins.jenkins.createProject(Folder::class.java, "metadata-deleted-context")
+        val project = folder.createProject(hudson.model.FreeStyleProject::class.java, "job")
+        val action = pendingRunAction("deleted-context", CnbBuildMetadataState.ABORTED)
+        val store = CnbCancelledBuildMetadataStores.current(jenkins.jenkins)
+        val retention = store.retain(project, action)
+        val workers = TestExecutor()
+        var reports = 0
+        val runtime =
+            CnbBuildMetadataDispatchRuntime(
+                workers = workers,
+                wakeups = TestWakeups(TestClock()),
+                reporter =
+                    CnbMetadataReporter { _, _ ->
+                        reports++
+                        CnbBuildMetadataReportResult("must-not-report")
+                    },
+            )
+
+        assertTrue(runtime.schedulePersistedItem(retention.credentialContext, retention.record, store))
+        folder.delete()
+        assertEquals(CnbCancelledBuildMetadataCredentialContext.DELETED, retention.record.credentialContextKind)
+
+        workers.runNext()
+
+        assertEquals(0, reports)
+        assertEquals(0, store.size())
+        assertTrue(action.isPending())
+        runtime.shutdown()
+    }
+
+    @Test
+    fun `cancelled item reloads pending action after acknowledgement save failure`(jenkins: JenkinsRule) {
+        val project = jenkins.createFreeStyleProject("metadata-cancel-save-restart")
+        val action = pendingRunAction("cancel-save-restart", CnbBuildMetadataState.ABORTED)
+        var writes = 0
+        val store =
+            cancelledStore(jenkins, "cancel-save-restart") {
+                writes++
+                if (writes == 2) throw IOException("injected cancellation store failure")
+            }
+        val retained = store.retain(project, action)
+        val workers = TestExecutor()
+        val runtime =
+            CnbBuildMetadataDispatchRuntime(
+                workers = workers,
+                wakeups = TestWakeups(TestClock()),
+                reporter = CnbMetadataReporter { _, _ -> CnbBuildMetadataReportResult("cancel-before-crash") },
+            )
+
+        assertTrue(runtime.schedulePersistedItem(project, retained.record, store))
+        workers.runNext()
+        assertTrue(action.isPending())
+        assertEquals(1, store.size())
+        runtime.shutdown()
+
+        val restored =
+            reloadedStore(jenkins, "cancel-save-restart")
+                .snapshotIterator()
+                .asSequence()
+                .single()
+                .action
+        assertNotSame(action, restored)
+        assertEquals(CnbBuildMetadataState.ABORTED, restored.state())
+        assertTrue(restored.isPending())
+    }
+
+    @Test
+    fun `newer cancelled state remains durable while an older snapshot commits`(jenkins: JenkinsRule) {
+        val project = jenkins.createFreeStyleProject("metadata-cancel-successor")
+        val action = pendingRunAction("cancel-successor", CnbBuildMetadataState.ABORTED)
+        val store = cancelledStore(jenkins, "cancel-successor")
+        val record = store.retain(project, action).record
+        val workers = TestExecutor()
+        val snapshots = mutableListOf<CnbBuildMetadataSnapshot>()
+        val runtime =
+            CnbBuildMetadataDispatchRuntime(
+                workers = workers,
+                wakeups = TestWakeups(TestClock()),
+                reporter =
+                    CnbMetadataReporter { snapshot, _ ->
+                        snapshots += snapshot
+                        if (snapshots.size == 1) {
+                            action.advance(
+                                action.target(),
+                                CnbBuildMetadataState.ABORTED,
+                                "cancel-successor-newer",
+                                "job/cancel-successor/newer/",
+                            )
+                        }
+                        CnbBuildMetadataReportResult("cancel-successor-comment")
+                    },
+            )
+
+        assertTrue(runtime.schedulePersistedItem(project, record, store))
+        workers.runNext()
+
+        assertTrue(action.isPending())
+        val restoredSuccessor =
+            reloadedStore(jenkins, "cancel-successor")
+                .snapshotIterator()
+                .asSequence()
+                .single()
+                .action
+        assertTrue(restoredSuccessor.isPending())
+        assertEquals(action.version(), restoredSuccessor.version())
+        assertEquals(1, runtime.activeCount())
+
+        workers.runNext()
+
+        assertEquals(2, snapshots.size)
+        assertTrue(snapshots[1].version > snapshots[0].version)
+        assertEquals(0, store.size())
+        runtime.shutdown()
+    }
+
+    @Test
+    fun `persisted ownership survives same version coalescing with active transient work`(jenkins: JenkinsRule) {
+        val project = jenkins.createFreeStyleProject("metadata-cancel-coalesced-owner")
+        val action = pendingRunAction("cancel-coalesced-owner", CnbBuildMetadataState.ABORTED)
+        val store = cancelledStore(jenkins, "cancel-coalesced-owner")
+        val record = store.retain(project, action).record
+        val workers = TestExecutor()
+        var reports = 0
+        val runtime =
+            CnbBuildMetadataDispatchRuntime(
+                workers = workers,
+                wakeups = TestWakeups(TestClock()),
+                reporter =
+                    CnbMetadataReporter { _, _ ->
+                        reports++
+                        CnbBuildMetadataReportResult("cancel-coalesced-comment")
+                    },
+            )
+
+        assertTrue(runtime.scheduleItem(project, action))
+        assertTrue(runtime.schedulePersistedItem(project, record, store))
+        assertEquals(1, runtime.pendingCount())
+
+        workers.runNext()
+        assertFalse(action.isPending())
+        assertEquals(1, store.size())
+        assertEquals(1, runtime.activeCount())
+
+        workers.runNext()
+        assertEquals(1, reports)
+        assertEquals(0, store.size())
+        assertFalse(reloadedStore(jenkins, "cancel-coalesced-owner").snapshotIterator().hasNext())
+        runtime.shutdown()
+    }
+
+    @Test
+    fun `reported transient work can still enqueue persisted cleanup`(jenkins: JenkinsRule) {
+        val project = jenkins.createFreeStyleProject("metadata-cancel-reported-cleanup")
+        val action = pendingRunAction("cancel-reported-cleanup", CnbBuildMetadataState.ABORTED)
+        val workers = TestExecutor()
+        var reports = 0
+        val runtime =
+            CnbBuildMetadataDispatchRuntime(
+                workers = workers,
+                wakeups = TestWakeups(TestClock()),
+                reporter =
+                    CnbMetadataReporter { _, _ ->
+                        reports++
+                        CnbBuildMetadataReportResult("cancel-reported-comment")
+                    },
+            )
+
+        assertTrue(runtime.scheduleItem(project, action))
+        workers.runNext()
+        assertFalse(action.isPending())
+
+        val retained =
+            cancelledStore(jenkins, "cancel-reported-cleanup").let { store -> store to store.retain(project, action) }
+        val store = retained.first
+        assertTrue(retained.second.initiallyPersisted)
+        assertTrue(runtime.schedulePersistedItem(project, retained.second.record, store))
+        workers.runNext()
+
+        assertEquals(1, reports)
+        assertEquals(0, store.size())
+        assertFalse(reloadedStore(jenkins, "cancel-reported-cleanup").snapshotIterator().hasNext())
+        runtime.shutdown()
+    }
+
+    private fun pendingRunAction(
+        identity: String,
+        state: CnbBuildMetadataState = CnbBuildMetadataState.SUCCESS,
+    ): CnbBuildMetadataAction {
         val action = CnbBuildMetadataAction("run:$identity")
         action.advance(
             CnbBuildMetadataTarget(
@@ -748,12 +1055,31 @@ class CnbBuildMetadataPersistenceTest {
                 context = "folder/job",
                 credentialsId = null,
             ),
-            CnbBuildMetadataState.SUCCESS,
+            state,
             identity,
             "job/$identity/",
         )
         return action
     }
+
+    private fun cancelledStore(
+        jenkins: JenkinsRule,
+        name: String,
+        beforePersistence: () -> Unit = {},
+    ): CnbCancelledBuildMetadataStore =
+        CnbCancelledBuildMetadataStore(
+            jenkins.jenkins.rootDir
+                .toPath()
+                .resolve("cnb-tests")
+                .resolve("$name.xml"),
+            beforePersistence = beforePersistence,
+            requestRecovery = {},
+        )
+
+    private fun reloadedStore(
+        jenkins: JenkinsRule,
+        name: String,
+    ): CnbCancelledBuildMetadataStore = cancelledStore(jenkins, name)
 
     private class TestClock {
         private var millis = 0L
