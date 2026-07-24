@@ -59,9 +59,11 @@ internal abstract class CnbRestartableAsyncStepExecution<T>(
     ): T
 
     /** Runs only after the successful result has reached a durable Pipeline checkpoint. */
+    @Throws(IOException::class, InterruptedException::class)
     protected open fun afterCheckpoint(value: T) = Unit
 
     /** Cleans attempt-scoped artifacts after failure or cancellation. Must be idempotent. */
+    @Throws(IOException::class, InterruptedException::class)
     protected open fun afterUnsuccessfulCompletion() = Unit
 
     final override fun start(): Boolean {
