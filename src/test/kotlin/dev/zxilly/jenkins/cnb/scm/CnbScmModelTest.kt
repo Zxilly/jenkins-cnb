@@ -179,31 +179,33 @@ class CnbScmModelTest {
     }
 
     @Test
-    fun `SCM file system uses merge revision only when CNB provides one`() {
-        val merged = pullRequest(mergeSha = "c".repeat(40))
-        val mergedFileSystem =
-            TestFileSystemBuilder(fileSystemClient(merged))
-                .build(
-                    CnbSCMSource("cnb-cool", "Acme/repo"),
-                    pullRequestHead("Acme/fork", ChangeRequestCheckoutStrategy.MERGE),
-                    null,
-                )
+    fun `SCM file system declines merge revisions with or without a server merge hash`() {
+        listOf<String?>("c".repeat(40), null).forEach { mergeHash ->
+            val closeCount = intArrayOf(0)
+            val head = pullRequestHead("Acme/fork", ChangeRequestCheckoutStrategy.MERGE)
+            val revision = CnbPullRequestSCMRevision(head, baseSha, headSha, mergeHash)
+            val fileSystem =
+                TestFileSystemBuilder(fileSystemClient(pullRequest(mergeSha = mergeHash), closeCount))
+                    .build(
+                        CnbSCMSource("cnb-cool", "Acme/repo"),
+                        head,
+                        revision,
+                    )
 
-        assertNotNull(mergedFileSystem)
-        assertEquals(merged.mergeSha, (mergedFileSystem!!.revision as CnbPullRequestSCMRevision).mergeHash)
-        mergedFileSystem.close()
+            assertNull(fileSystem)
+            assertEquals(1, closeCount.single())
+        }
 
         val closeCount = intArrayOf(0)
-        val unavailable = pullRequest(mergeSha = null)
-        val unavailableFileSystem =
-            TestFileSystemBuilder(fileSystemClient(unavailable, closeCount))
+        val fileSystem =
+            TestFileSystemBuilder(fileSystemClient(pullRequest(mergeSha = "c".repeat(40)), closeCount))
                 .build(
                     CnbSCMSource("cnb-cool", "Acme/repo"),
                     pullRequestHead("Acme/fork", ChangeRequestCheckoutStrategy.MERGE),
                     null,
                 )
 
-        assertNull(unavailableFileSystem)
+        assertNull(fileSystem)
         assertEquals(1, closeCount.single())
     }
 

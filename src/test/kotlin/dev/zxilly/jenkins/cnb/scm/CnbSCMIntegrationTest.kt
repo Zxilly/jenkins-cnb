@@ -21,9 +21,13 @@ import dev.zxilly.jenkins.cnb.config.CnbServer
 import hudson.model.TaskListener
 import hudson.plugins.git.GitChangeSet
 import hudson.plugins.git.GitSCM
+import hudson.plugins.git.util.BuildData
+import hudson.plugins.git.util.BuildChooser
+import hudson.plugins.git.util.BuildChooserContext
 import jenkins.plugins.git.MergeWithGitSCMExtension
 import jenkins.scm.api.SCMHeadOrigin
 import jenkins.scm.api.mixin.ChangeRequestCheckoutStrategy
+import org.jenkinsci.plugins.gitclient.GitClient
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertInstanceOf
 import org.junit.jupiter.api.Assertions.assertNull
@@ -107,31 +111,45 @@ class CnbSCMIntegrationTest {
     }
 
     @Test
-    fun `merge revision without server merge hash checks out source and locally merges fixed base`(jenkins: JenkinsRule) {
+    fun `merge revisions pin source head and locally merge fixed base`(jenkins: JenkinsRule) {
         assertTrue(jenkins.jenkins.isUseSecurity.not())
         val source = CnbSCMSource("cnb-cool", "acme/repo")
         val head = pullRequestHead(ChangeRequestCheckoutStrategy.MERGE)
-        val revision = CnbPullRequestSCMRevision(head, "b".repeat(40), "a".repeat(40), null)
 
-        val scm = source.build(head, revision) as GitSCM
-        val merge = scm.extensions.filterIsInstance<MergeWithGitSCMExtension>().single()
-        val browser = assertInstanceOf(CnbRepositoryBrowser::class.java, scm.browser)
+        listOf<String?>(null, "c".repeat(40)).forEach { mergeHash ->
+            val revision = CnbPullRequestSCMRevision(head, "b".repeat(40), "a".repeat(40), mergeHash)
+            val scm = source.build(head, revision) as GitSCM
+            val merge = scm.extensions.filterIsInstance<MergeWithGitSCMExtension>().single()
+            val browser = assertInstanceOf(CnbRepositoryBrowser::class.java, scm.browser)
+            val buildChooser: BuildChooser = scm.buildChooser
+            val checkout =
+                buildChooser
+                    .getCandidateRevisions(
+                        false,
+                        "PR-42",
+                        unusedGitClient(),
+                        TaskListener.NULL,
+                        BuildData(),
+                        unusedBuildChooserContext(),
+                    ).single()
 
-        assertEquals(
-            listOf("https://cnb.cool/contributor/repo", "https://cnb.cool/acme/repo"),
-            scm.userRemoteConfigs.map { it.url },
-        )
-        assertEquals("remotes/upstream/main", merge.baseName)
-        assertEquals("b".repeat(40), merge.baseHash)
-        assertEquals("PR-42", scm.branches.single().name)
-        assertEquals(
-            "https://cnb.cool/contributor/repo/-/commit/${"a".repeat(40)}",
-            browser.getChangeSetLink(GitChangeSet(listOf("commit ${"a".repeat(40)}"), true)).toExternalForm(),
-        )
-        assertEquals(
-            "https://cnb.cool/acme/repo/-/pulls/42",
-            browser.pullRequestLink("42").toExternalForm(),
-        )
+            assertEquals(
+                listOf("https://cnb.cool/contributor/repo", "https://cnb.cool/acme/repo"),
+                scm.userRemoteConfigs.map { it.url },
+            )
+            assertEquals("a".repeat(40), checkout.sha1.name)
+            assertEquals("remotes/upstream/main", merge.baseName)
+            assertEquals("b".repeat(40), merge.baseHash)
+            assertEquals("PR-42", scm.branches.single().name)
+            assertEquals(
+                "https://cnb.cool/contributor/repo/-/commit/${"a".repeat(40)}",
+                browser.getChangeSetLink(GitChangeSet(listOf("commit ${"a".repeat(40)}"), true)).toExternalForm(),
+            )
+            assertEquals(
+                "https://cnb.cool/acme/repo/-/pulls/42",
+                browser.pullRequestLink("42").toExternalForm(),
+            )
+        }
     }
 
     @Test
@@ -278,7 +296,7 @@ class CnbSCMIntegrationTest {
         assertTrue(jenkins.jenkins.isUseSecurity.not())
         val calls = mutableListOf<Triple<String, String, String>>()
         val head = pullRequestHead(ChangeRequestCheckoutStrategy.MERGE)
-        val revision = CnbPullRequestSCMRevision(head, "b".repeat(40), "a".repeat(40), null)
+        val revision = CnbPullRequestSCMRevision(head, "b".repeat(40), "a".repeat(40), "c".repeat(40))
         val source = ProbeSource(criteriaClient(calls, targetHasJenkinsfile = true, sourceHasJenkinsfile = true))
 
         source.openProbe(head, revision).use { probe ->
@@ -293,7 +311,7 @@ class CnbSCMIntegrationTest {
         assertTrue(jenkins.jenkins.isUseSecurity.not())
         val calls = mutableListOf<Triple<String, String, String>>()
         val head = pullRequestHead(ChangeRequestCheckoutStrategy.MERGE)
-        val revision = CnbPullRequestSCMRevision(head, "b".repeat(40), "a".repeat(40), null)
+        val revision = CnbPullRequestSCMRevision(head, "b".repeat(40), "a".repeat(40), "c".repeat(40))
         val source = ProbeSource(criteriaClient(calls, targetHasJenkinsfile = true, sourceHasJenkinsfile = false))
         source.setTraits(listOf(CnbForkPullRequestDiscoveryTrait(1, TrustEveryone())))
 
@@ -341,6 +359,22 @@ class CnbSCMIntegrationTest {
             revision: CnbPullRequestSCMRevision,
         ): CnbSCMProbe = createProbe(head, revision)
     }
+
+    private fun unusedGitClient(): GitClient =
+        Proxy.newProxyInstance(
+            GitClient::class.java.classLoader,
+            arrayOf(GitClient::class.java),
+        ) { _, method, _ ->
+            throw AssertionError("Specific revision chooser unexpectedly called GitClient.${method.name}")
+        } as GitClient
+
+    private fun unusedBuildChooserContext(): BuildChooserContext =
+        Proxy.newProxyInstance(
+            BuildChooserContext::class.java.classLoader,
+            arrayOf(BuildChooserContext::class.java),
+        ) { _, method, _ ->
+            throw AssertionError("Specific revision chooser unexpectedly called BuildChooserContext.${method.name}")
+        } as BuildChooserContext
 
     private fun configureServer(
         id: String,
