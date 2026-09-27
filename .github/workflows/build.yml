@@ -75,7 +75,7 @@ jobs:
           if-no-files-found: error
       - name: Upload coverage
         if: matrix.os == 'ubuntu-latest' && matrix.java == '25'
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7
         with:
           files: target/site/jacoco/jacoco.xml
           disable_search: true
