@@ -76,6 +76,7 @@ class CnbPullRequestCommentTriggerTraitTest {
         project.sourcesList.add(BranchSource(source))
 
         jenkins.configRoundtrip(project)
+        jenkins.waitUntilNoActivity()
 
         val restored =
             (project.sourcesList.single().source as CnbSCMSource)
@@ -98,6 +99,7 @@ class CnbPullRequestCommentTriggerTraitTest {
         project.sourcesList.add(BranchSource(source))
 
         jenkins.configRoundtrip(project)
+        jenkins.waitUntilNoActivity()
 
         val restored =
             (project.sourcesList.single().source as CnbSCMSource)

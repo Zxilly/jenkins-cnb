@@ -34,4 +34,10 @@
     <Class name="~dev\.zxilly\.jenkins\.cnb\.api\.RepeatableStreamContent\$writeTo\$.*" />
     <Bug pattern="NP_NULL_ON_SOME_PATH_FROM_RETURN_VALUE" />
   </Match>
+  <!-- Ktor 3.6 typeInfo<T>() intentionally probes null is T to preserve generic nullability. -->
+  <Match>
+    <Class name="dev.zxilly.jenkins.cnb.api.HttpCnbClient$requestJson$1" />
+    <Method name="read" />
+    <Bug pattern="NP_NULL_INSTANCEOF" />
+  </Match>
 </FindBugsFilter>
