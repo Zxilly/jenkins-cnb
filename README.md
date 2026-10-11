@@ -1,5 +1,7 @@
 # CNB Plugin
 
+简体中文 | [English](README.en.md)
+
 [![Build](https://github.com/Zxilly/jenkins-cnb/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/Zxilly/jenkins-cnb/actions/workflows/build.yml)
 [![Jenkins Security Scan](https://github.com/Zxilly/jenkins-cnb/actions/workflows/jenkins-security-scan.yml/badge.svg?branch=master)](https://github.com/Zxilly/jenkins-cnb/actions/workflows/jenkins-security-scan.yml)
 [![License](https://img.shields.io/github/license/Zxilly/jenkins-cnb.svg)](LICENSE)
@@ -51,38 +53,15 @@
 
 ## 安装
 
-### 从 GitHub Release 安装
+通过 CNB Update Center 安装和更新插件：
 
-1. 从 [GitHub Releases](https://github.com/Zxilly/jenkins-cnb/releases) 下载 `cnb.hpi` 和校验文件。
-2. 在 **Manage Jenkins > Plugins > Advanced settings** 中上传 `cnb.hpi`。
-3. 重启 Jenkins。
+`https://zxilly.github.io/jenkins-cnb/update-center.json`
 
-手动上传 HPI 时，Jenkins 不会自动从 Update Center 安装依赖。请先安装以下插件：
+1. 按 [更新站点配置说明](docs/update-center.md)安装公开签名证书，并添加 CNB 更新源。
+2. 在 **Manage Jenkins > Plugins** 点击 **Check now**，搜索 **CNB Integration** 并安装。
+3. 安装完成后重启 Jenkins。后续版本可在插件管理器中更新。
 
-```text
-workflow-multibranch workflow-step-api branch-api cloudbees-folder
-credentials-binding credentials git-client git plain-credentials scm-api structs
-```
-
-发布版本提供 GitHub 构建来源证明时，可以使用以下命令验证：
-
-```bash
-gh attestation verify cnb.hpi --repo Zxilly/jenkins-cnb
-```
-
-### Docker
-
-```dockerfile
-FROM jenkins/jenkins:2.568.1-jdk21
-
-RUN jenkins-plugin-cli --plugins \
-    "workflow-multibranch workflow-step-api branch-api cloudbees-folder \
-     credentials-binding credentials git-client git plain-credentials scm-api structs"
-
-COPY --chown=jenkins:jenkins cnb.hpi /usr/share/jenkins/ref/plugins/cnb.jpi
-```
-
-生产镜像应固定 Jenkins、依赖插件和基础镜像 digest。
+保留 Jenkins 默认更新源用于安装依赖插件。
 
 ## 凭据与权限
 

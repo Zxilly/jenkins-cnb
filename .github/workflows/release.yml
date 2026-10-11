@@ -64,52 +64,7 @@ jobs:
       - name: Verify HPI identity and bundled libraries
         env:
           VERSION: ${{ github.ref_name }}
-        shell: bash
-        run: |
-          unzip -p target/cnb.hpi META-INF/MANIFEST.MF \
-            | tr -d '\r' > "$RUNNER_TEMP/cnb-manifest.mf"
-          grep -Fx 'Short-Name: cnb' "$RUNNER_TEMP/cnb-manifest.mf"
-          grep -Fx "Plugin-Version: ${VERSION#v}" "$RUNNER_TEMP/cnb-manifest.mf"
-          grep -Fx 'Jenkins-Version: 2.541.3' "$RUNNER_TEMP/cnb-manifest.mf"
-          grep -Fx 'Java-Version: 17' "$RUNNER_TEMP/cnb-manifest.mf"
-          grep -Fx "Plugin-ScmTag: $VERSION" "$RUNNER_TEMP/cnb-manifest.mf"
-          grep -Fx "Implementation-Build: $TAG_COMMIT" "$RUNNER_TEMP/cnb-manifest.mf"
-
-          unzip -Z1 target/cnb.hpi \
-            | grep '^WEB-INF/lib/[^/]*$' \
-            | LC_ALL=C sort > "$RUNNER_TEMP/cnb-libraries.txt"
-          cat > "$RUNNER_TEMP/expected-libraries.txt" <<'EOF'
-          WEB-INF/lib/annotations-26.1.0.jar
-          WEB-INF/lib/cnb.jar
-          WEB-INF/lib/httpclient5-5.6.2.jar
-          WEB-INF/lib/httpcore5-5.4.3.jar
-          WEB-INF/lib/httpcore5-h2-5.4.3.jar
-          WEB-INF/lib/kotlin-stdlib-2.4.10.jar
-          WEB-INF/lib/kotlinx-coroutines-core-jvm-1.11.0.jar
-          WEB-INF/lib/kotlinx-coroutines-slf4j-1.11.0.jar
-          WEB-INF/lib/kotlinx-io-bytestring-jvm-0.9.1.jar
-          WEB-INF/lib/kotlinx-io-core-jvm-0.9.1.jar
-          WEB-INF/lib/kotlinx-serialization-core-jvm-1.11.0.jar
-          WEB-INF/lib/kotlinx-serialization-json-io-jvm-1.11.0.jar
-          WEB-INF/lib/kotlinx-serialization-json-jvm-1.11.0.jar
-          WEB-INF/lib/ktor-client-apache5-jvm-3.5.1.jar
-          WEB-INF/lib/ktor-client-content-negotiation-jvm-3.5.1.jar
-          WEB-INF/lib/ktor-client-core-jvm-3.5.1.jar
-          WEB-INF/lib/ktor-events-jvm-3.5.1.jar
-          WEB-INF/lib/ktor-http-cio-jvm-3.5.1.jar
-          WEB-INF/lib/ktor-http-jvm-3.5.1.jar
-          WEB-INF/lib/ktor-io-jvm-3.5.1.jar
-          WEB-INF/lib/ktor-network-jvm-3.5.1.jar
-          WEB-INF/lib/ktor-serialization-jvm-3.5.1.jar
-          WEB-INF/lib/ktor-serialization-kotlinx-json-jvm-3.5.1.jar
-          WEB-INF/lib/ktor-serialization-kotlinx-jvm-3.5.1.jar
-          WEB-INF/lib/ktor-sse-jvm-3.5.1.jar
-          WEB-INF/lib/ktor-utils-jvm-3.5.1.jar
-          WEB-INF/lib/ktor-websocket-serialization-jvm-3.5.1.jar
-          WEB-INF/lib/ktor-websockets-jvm-3.5.1.jar
-          WEB-INF/lib/re2j-1.8.jar
-          EOF
-          diff -u "$RUNNER_TEMP/expected-libraries.txt" "$RUNNER_TEMP/cnb-libraries.txt"
+        run: python3 scripts/verify-release.py target/cnb.hpi pom.xml
       - name: Create checksum
         working-directory: target
         run: sha256sum cnb.hpi > cnb.hpi.sha256
@@ -124,6 +79,8 @@ jobs:
           retention-days: 1
 
   publish:
+    outputs:
+      stable: ${{ steps.publish.outputs.stable }}
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -161,6 +118,7 @@ jobs:
         with:
           subject-path: target/cnb.hpi
       - name: Publish GitHub release
+        id: publish
         shell: bash
         run: |
           release_version="${GITHUB_REF_NAME#v}"
@@ -168,9 +126,11 @@ jobs:
           release_flags=(--draft=false --title "$GITHUB_REF_NAME" --verify-tag)
           create_flags=(--title "$GITHUB_REF_NAME" --verify-tag --generate-notes)
           if [[ "$version_without_build" == *-* ]]; then
+            echo "stable=false" >> "$GITHUB_OUTPUT"
             release_flags+=(--prerelease --latest=false)
             create_flags+=(--prerelease --latest=false)
           else
+            echo "stable=true" >> "$GITHUB_OUTPUT"
             release_flags+=(--prerelease=false)
           fi
 
@@ -191,3 +151,13 @@ jobs:
               target/cnb.hpi.sha256 \
               "${create_flags[@]}"
           fi
+
+  update-center:
+    if: needs.publish.outputs.stable == 'true'
+    needs: publish
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/update-center.yml
+    secrets: inherit

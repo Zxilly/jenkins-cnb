@@ -15,3 +15,8 @@
 # Local Jenkins runtime created by mvn hpi:run
 /work/
 /jenkins-home/
+
+# Update center build output and local signing material
+/update-center/target/
+/update-center/*.p12
+/scripts/__pycache__/
