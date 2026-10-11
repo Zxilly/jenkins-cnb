@@ -81,19 +81,36 @@ jobs:
           disable_search: true
           fail_ci_if_error: false
 
+  update-center-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - run: ./mvnw -B -ntp -f update-center/pom.xml verify
+      - run: python3 -m unittest discover -s scripts -p 'test_*.py'
+
   build-gate:
     name: build-gate
     if: always()
-    needs: [conventional-commit, verify]
+    needs: [conventional-commit, verify, update-center-test]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require successful verification
         env:
           CONVENTIONAL_COMMIT_RESULT: ${{ needs.conventional-commit.result }}
+          UPDATE_CENTER_RESULT: ${{ needs.update-center-test.result }}
           VERIFY_RESULT: ${{ needs.verify.result }}
         shell: bash
         run: |
+          test "$UPDATE_CENTER_RESULT" = success
           if [[ "$VERIFY_RESULT" != 'success' ]]; then
             echo "Verification matrix result: $VERIFY_RESULT" >&2
             exit 1

@@ -1,0 +1,88 @@
+name: Publish Update Center
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      UC_KEYSTORE_BASE64:
+        required: false
+      UC_KEYSTORE_PASSWORD:
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cnb-update-center
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    if: github.repository == 'Zxilly/jenkins-cnb'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: update-center
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: master
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - name: Select highest stable release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh api "repos/$GH_REPO/releases?per_page=100" --paginate --slurp > "$RUNNER_TEMP/releases.json"
+          python3 scripts/select-update-release.py "$RUNNER_TEMP/releases.json" "$GITHUB_OUTPUT"
+      - name: Download released HPI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          gh release download "$RELEASE_TAG" --pattern cnb.hpi --pattern cnb.hpi.sha256 --dir "$RUNNER_TEMP/release"
+          cd "$RUNNER_TEMP/release"
+          sha256sum -c cnb.hpi.sha256
+      - name: Build and test generator
+        run: ./mvnw -B -ntp -f update-center/pom.xml verify
+      - name: Sign update metadata
+        env:
+          UC_KEYSTORE_BASE64: ${{ secrets.UC_KEYSTORE_BASE64 }}
+          UC_KEYSTORE_PASSWORD: ${{ secrets.UC_KEYSTORE_PASSWORD }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          DOWNLOAD_URL: ${{ steps.release.outputs.url }}
+        run: |
+          umask 077
+          test -n "$UC_KEYSTORE_BASE64" && test -n "$UC_KEYSTORE_PASSWORD"
+          key_store="$RUNNER_TEMP/cnb-signing.p12"
+          trap 'rm -f "$key_store"' EXIT
+          printf '%s' "$UC_KEYSTORE_BASE64" | base64 --decode > "$key_store"
+          java -jar update-center/target/cnb-update-center-1.0.0.jar \
+            "$RUNNER_TEMP/release/cnb.hpi" "${RELEASE_TAG#v}" "$DOWNLOAD_URL" \
+            "$RUNNER_TEMP/update-site" "$key_store"
+          openssl x509 -in docs/cnb-update-center.crt -outform DER > "$RUNNER_TEMP/expected-cert.der"
+          openssl x509 -in "$RUNNER_TEMP/update-site/cnb-update-center.crt" -outform DER > "$RUNNER_TEMP/actual-cert.der"
+          cmp "$RUNNER_TEMP/expected-cert.der" "$RUNNER_TEMP/actual-cert.der"
+      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        with:
+          path: ${{ runner.temp }}/update-site
+
+  deploy:
+    needs: generate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        id: deployment
