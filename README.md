@@ -1,252 +1,217 @@
 # CNB Plugin
 
-English | [简体中文](README.zh-CN.md)
+简体中文 | [English](README.en.md)
 
 [![Build](https://github.com/Zxilly/jenkins-cnb/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/Zxilly/jenkins-cnb/actions/workflows/build.yml)
 [![Jenkins Security Scan](https://github.com/Zxilly/jenkins-cnb/actions/workflows/jenkins-security-scan.yml/badge.svg?branch=master)](https://github.com/Zxilly/jenkins-cnb/actions/workflows/jenkins-security-scan.yml)
 [![License](https://img.shields.io/github/license/Zxilly/jenkins-cnb.svg)](LICENSE)
 
-This plugin connects Jenkins to [CNB](https://cnb.cool) repositories. It triggers builds from code and pull
-request events, discovers projects for Multibranch Pipelines and Organization Folders, and reports build
-results to CNB.
+这个插件将 Jenkins 与 [CNB](https://cnb.cool) 仓库连接起来。它可以根据 CNB 代码和 Pull Request
+事件触发构建，发现 Multibranch 和 Organization Folder 项目，并将构建结果上报到 CNB。
 
-The plugin short name is `cnb`.
+插件短名称为 `cnb`。
 
-## Contents
+## 目录
 
-- [Features](#features)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Credentials and permissions](#credentials-and-permissions)
-- [Global configuration](#global-configuration)
-- [Jenkins job configuration](#jenkins-job-configuration)
+- [功能](#功能)
+- [系统要求](#系统要求)
+- [安装](#安装)
+- [凭据与权限](#凭据与权限)
+- [全局配置](#全局配置)
+- [Jenkins Job 配置](#jenkins-job-配置)
 - [Webhook](#webhook)
-- [Build environment variables](#build-environment-variables)
+- [构建环境变量](#构建环境变量)
 - [Pipeline](#pipeline)
-- [Build result reporting](#build-result-reporting)
-- [Known limitations](#known-limitations)
-- [Troubleshooting](#troubleshooting)
-- [Support and contributing](#support-and-contributing)
+- [结果上报](#结果上报)
+- [已知限制](#已知限制)
+- [故障排查](#故障排查)
+- [支持与贡献](#支持与贡献)
 
-## Features
+## 功能
 
-- Connect to `cnb.cool` or private instances compatible with CNB OpenAPI, with multiple server profiles.
-- Support Freestyle jobs, Pipelines, Multibranch Pipelines, and Organization Folders.
-- Discover branches, tags, and pull requests from the same repository or forks.
-- Check out pull request HEAD or MERGE revisions.
-- Display CNB namespace avatars in Multibranch Pipelines and Organization Folders.
-- Link recognized CNB pull request and commit references in Jenkins changelogs.
-- Receive push, branch, tag, pull request, review, and comment events.
-- Filter builds by branch, tag, pull request, draft status, labels, and commenter role.
-- Report build status through pull request comments and commit or tag annotations.
-- List, read, and upload CNB badges.
-- Provide Pipeline steps for pull requests, CNB builds, releases, and release assets.
-- Support JCasC, event polling, credential rotation, and recovery after Jenkins restarts.
+- 连接 `cnb.cool` 或兼容 CNB OpenAPI 的私有实例，并支持多个 Server 配置。
+- 支持 Freestyle、Pipeline、Multibranch Pipeline 和 Organization Folder。
+- 发现分支、Tag、同仓 Pull Request 和 Fork Pull Request。
+- 支持 Pull Request HEAD 与 MERGE 两种 checkout 策略。
+- 在 Multibranch Pipeline 和 Organization Folder 中显示 CNB namespace 头像。
+- 将 Jenkins changelog 中明确的 CNB Pull Request 和 Commit 转为可点击链接。
+- 接收 Push、分支、Tag、Pull Request、评审和评论事件。
+- 按分支、Tag、Pull Request、Draft、标签和评论者角色过滤构建。
+- 在 Pull Request 评论以及 Commit/Tag annotations 中上报构建状态。
+- 列出、读取和上传 CNB Badge。
+- 提供 Pull Request、CNB Build、Release 和 Release Asset Pipeline steps。
+- 支持 JCasC、事件轮询、凭据轮换和 Jenkins 重启恢复。
 
-## Requirements
+## 系统要求
 
-- Jenkins `2.541.3` or later.
-- Java 17, 21, or 25 on the Jenkins controller and agents running the plugin's workspace steps.
-- HTTPS CNB web/API, webhook, and Git checkout URLs in production.
-- HTTPS Git checkout. CNB does not support SSH checkout, so the plugin does not accept SSH clone URLs or
-  SSH credentials.
+- Jenkins `2.541.3` 或更高版本。
+- 支持 Java 17、21 和 25；Jenkins Controller 与执行插件 workspace steps 的 Agent 使用相同支持范围。
+- 生产环境只支持 HTTPS CNB Web/API、Webhook 和 Git checkout 地址。
+- Git checkout 使用 HTTPS。CNB 不支持 SSH checkout，因此插件不接受 SSH clone URL 或 SSH 凭据。
 
-Minimum dependency versions are recorded in the released HPI's `Plugin-Dependencies` manifest field.
+最低依赖版本以发布 HPI 的 `Plugin-Dependencies` Manifest 字段为准。
 
-## Installation
+## 安装
 
-### From a GitHub release
+通过 CNB Update Center 安装和更新插件：
 
-1. Download `cnb.hpi` and its checksum file from [GitHub Releases](https://github.com/Zxilly/jenkins-cnb/releases).
-2. Upload `cnb.hpi` under **Manage Jenkins > Plugins > Advanced settings**.
-3. Restart Jenkins.
+`https://zxilly.github.io/jenkins-cnb/update-center.json`
 
-When uploading an HPI manually, Jenkins does not automatically install its dependencies from the Update
-Center. Install these plugins first:
+1. 按 [更新站点配置说明](docs/update-center.md)安装公开签名证书，并添加 CNB 更新源。
+2. 在 **Manage Jenkins > Plugins** 点击 **Check now**，搜索 **CNB Integration** 并安装。
+3. 安装完成后重启 Jenkins。后续版本可在插件管理器中更新。
 
-```text
-workflow-multibranch workflow-step-api branch-api cloudbees-folder
-credentials-binding credentials git-client git plain-credentials scm-api structs
-```
+保留 Jenkins 默认更新源用于安装依赖插件。
 
-If the release provides a GitHub build provenance attestation, verify it with:
+## 凭据与权限
 
-```bash
-gh attestation verify cnb.hpi --repo Zxilly/jenkins-cnb
-```
+### 凭据类型
 
-### Docker
+插件支持以下 Jenkins Credentials：
 
-```dockerfile
-FROM jenkins/jenkins:2.568.1-jdk21
+- **CNB access token**：同时用于 CNB API 和 HTTPS Git checkout，Git 用户名固定为 `cnb`。
+- **Secret Text**：可用于 CNB API，不能直接用于 Git checkout。
+- **Username with password**：可用于 CNB API；用于 checkout 时用户名必须为 `cnb`，密码填写 CNB Token。
+- **Secret Text webhook key**：每个仓库独立配置，至少 32 个 UTF-8 字节。
 
-RUN jenkins-plugin-cli --plugins \
-    "workflow-multibranch workflow-step-api branch-api cloudbees-folder \
-     credentials-binding credentials git-client git plain-credentials scm-api structs"
+API、checkout 和结果上报可以使用不同凭据。Webhook HMAC 密钥不能复用 CNB Token。
 
-COPY --chown=jenkins:jenkins cnb.hpi /usr/share/jenkins/ref/plugins/cnb.jpi
-```
+### 最小权限
 
-For production images, pin Jenkins and dependency plugin versions, as well as the base image digest.
-
-## Credentials and permissions
-
-### Credential types
-
-The plugin supports the following Jenkins credentials:
-
-- **CNB access token**: used for both CNB API access and HTTPS Git checkout. The Git username is always `cnb`.
-- **Secret Text**: used for CNB API access; cannot be used directly for Git checkout.
-- **Username with password**: used for CNB API access. For checkout, set the username to `cnb` and the
-  password to a CNB token.
-- **Secret Text webhook key**: configured separately for each repository, with at least 32 UTF-8 bytes.
-
-API access, checkout, and result reporting can use separate credentials. Do not reuse a CNB token as a
-webhook HMAC key.
-
-### Minimum permissions
-
-| Purpose | CNB token scopes |
+| 用途 | CNB Token scope |
 | --- | --- |
-| Basic scanning and Organization Folders | `account-profile:r account-engage:r group-resource:r repo-basic-info:r repo-code:r repo-pr:r repo-release:r` |
-| Reading pull request comments and reviews | `repo-notes:r` |
-| Member trust and comment triggers | `repo-manage:r` |
-| Reporting through pull request comments | `repo-notes:rw` |
-| Reporting through commit annotations | `repo-code:rw` |
-| Reporting through tag annotations | `repo-release:rw` |
-| Reading badges | `repo-commit-status:r` |
-| Uploading badges | `repo-commit-status:rw` |
-| Pull request write operations | `repo-pr:rw`; comments, reviews, and replies also require `repo-notes:rw` |
-| Reading releases | `repo-release:r` |
-| Writing releases | `repo-release:rw` |
-| CNB build status, stages, and logs | `repo-cnb-trigger:r` |
-| Starting and stopping CNB builds | `repo-cnb-trigger:rw` |
-| CNB build history | `repo-cnb-history:r` |
+| 基础扫描和 Organization Folder | `account-profile:r account-engage:r group-resource:r repo-basic-info:r repo-code:r repo-pr:r repo-release:r` |
+| Pull Request 评论和评审读取 | `repo-notes:r` |
+| 成员信任和评论触发 | `repo-manage:r` |
+| Pull Request 评论上报 | `repo-notes:rw` |
+| Commit annotation 上报 | `repo-code:rw` |
+| Tag annotation 上报 | `repo-release:rw` |
+| Badge 读取 | `repo-commit-status:r` |
+| Badge 上传 | `repo-commit-status:rw` |
+| Pull Request 写操作 | `repo-pr:rw`；评论、评审和回复还需要 `repo-notes:rw` |
+| Release 读取 | `repo-release:r` |
+| Release 写入 | `repo-release:rw` |
+| CNB Build 状态、Stage 和日志 | `repo-cnb-trigger:r` |
+| 启动和停止 CNB Build | `repo-cnb-trigger:rw` |
+| CNB Build 历史 | `repo-cnb-history:r` |
 
-Do not grant `repo-delete:rw`. Grant only the scopes required by the features you enable.
+不要授予 `repo-delete:rw`。仅按实际启用的功能授予上表列出的最小 scope。
 
-## Global configuration
+## 全局配置
 
-Open **Manage Jenkins > System > CNB** and add a CNB server.
+打开 **Manage Jenkins > System > CNB**，添加一个 CNB Server。
 
-| Field | Description |
+| 字段 | 说明 |
 | --- | --- |
-| **ID** | A stable, unique server ID, such as `cnb-cool`. It is also part of the webhook URL. |
-| **Name** | The display name in Jenkins. |
-| **Web URL** | The CNB web URL, such as `https://cnb.cool`. |
-| **API URL** | The CNB API URL, such as `https://api.cnb.cool`. |
-| **API credentials** | Credentials for scanning and reading the CNB API. |
-| **Result-reporting credentials** | Optional credentials for writing comments and annotations. Falls back to API credentials when unset. |
-| **Repository webhook secrets** | A mapping of full repository paths to Secret Text credentials. |
-| **Build result reporting** | Report through pull request comments, commit/tag annotations, both, or neither. |
-| **Event polling** | Configure repository event polling and the webhook time window. |
-| **Timeouts** | Configure connection and request timeouts. |
+| **ID** | 稳定且唯一的 Server ID，例如 `cnb-cool`；它也会出现在 Webhook URL 中。 |
+| **Name** | Jenkins 中显示的名称。 |
+| **Web URL** | CNB Web 地址，例如 `https://cnb.cool`。 |
+| **API URL** | CNB API 地址，例如 `https://api.cnb.cool`。 |
+| **API credentials** | 用于扫描和读取 CNB API。 |
+| **Result-reporting credentials** | 可选，用于评论和 annotation 写入；留空时回退到 API credentials。 |
+| **Repository webhook secrets** | 仓库完整路径与 Secret Text 的映射。 |
+| **Build result reporting** | 选择 Pull Request 评论、Commit/Tag annotation、两者同时或关闭。 |
+| **Event polling** | 配置仓库事件轮询和 Webhook 时间窗口。 |
+| **Timeouts** | 配置连接与请求超时。 |
 
-Click **Test scan/API credential** to verify the URLs, credentials, and user identity.
+点击 **Test scan/API credential** 验证 URL、凭据和用户身份。
 
-By default, result reporting writes both pull request comments and commit/tag annotations. If your API
-credentials have only read access, configure separate result-reporting credentials or disable automatic
-reporting.
+默认上报模式为同时写入 Pull Request 评论和 Commit/Tag annotation。API credentials 只有读取权限时，
+请配置独立的 Result-reporting credentials，或关闭自动上报。
 
-To rotate a webhook key, set the new key as current and retain the old key as previous. Wait for one
-webhook time window before removing the previous key.
+Webhook 密钥轮换时，将新密钥设为 current，并在 previous 中保留旧密钥。等待一个 Webhook 时间窗口后，
+再删除 previous。
 
-Administrators must explicitly allow private network access when a private CNB instance uses internal
-addresses. The insecure HTTP option is intended only for isolated local tests.
+私有 CNB 实例访问内网地址时，需要管理员显式允许私网访问。不安全 HTTP 选项只用于隔离的本地测试。
 
-See [docs/jcasc.yaml](docs/jcasc.yaml) for a JCasC example.
+JCasC 示例见 [docs/jcasc.yaml](docs/jcasc.yaml)。
 
-## Jenkins job configuration
+## Jenkins Job 配置
 
 ### Multibranch Pipeline
 
-1. Create a **Multibranch Pipeline**.
-2. Add **CNB repository** under **Branch Sources**.
-3. Select the server, API credentials, and checkout credentials.
-4. Enter the full repository path, such as `group/subgroup/repository`.
-5. Configure discovery and filtering traits, then run indexing.
+1. 创建 **Multibranch Pipeline**。
+2. 在 **Branch Sources** 中添加 **CNB repository**。
+3. 选择 Server、API credentials 和 checkout credentials。
+4. 填写完整仓库路径，例如 `group/subgroup/repository`。
+5. 配置需要的发现与过滤 Traits，然后运行索引。
 
-Available traits include:
+可用 traits 包括：
 
-- Branch discovery and filters for protected or locked branches.
-- Tag discovery.
-- HEAD/MERGE discovery for pull requests from the same repository.
-- HEAD/MERGE discovery for fork pull requests, with draft, branch, label, and trust filters.
-- Pull request builds triggered by authorized CNB comments.
-- A context for automatic result reporting, or an option to disable automatic Branch Source reporting.
+- 分支发现以及受保护/锁定分支过滤。
+- Tag 发现。
+- 同仓 Pull Request HEAD/MERGE 发现。
+- Fork Pull Request HEAD/MERGE、Draft、分支、标签和信任过滤。
+- 基于授权 CNB 评论触发 Pull Request 构建。
+- 自动结果上报 context，或关闭 Branch Source 自动上报。
 
-Fork pull requests are untrusted by default. Unless a different trust authority is explicitly configured,
-Jenkins reads the Jenkinsfile from the target branch and uses the fork only for the source code to build.
+Fork Pull Request 默认不可信。除非显式配置其他 authority，Jenkinsfile 从目标分支读取，Fork 只提供
+待构建源码。
 
 ### Organization Folder
 
-1. Create an **Organization Folder**.
-2. Add **CNB namespace**.
-3. Select the server and credentials, and enter the CNB organization path.
-4. Configure repository filters and discovery traits.
+1. 创建 **Organization Folder**。
+2. 添加 **CNB namespace**。
+3. 选择 Server 和凭据，并填写 CNB 组织路径。
+4. 配置仓库过滤和 discovery traits。
 
-The navigator can discover sub-organizations recursively. Archived repositories are excluded by default,
-and Secret repositories are not used as checkout sources.
+Navigator 可以递归发现子组织。归档仓库默认排除，Secret 仓库不会作为可 checkout 来源。
 
-### Freestyle and standalone Pipeline jobs
+### Freestyle 和普通 Pipeline Job
 
-Under **Source Code Management > Git**, enter a CNB HTTPS clone URL and select credentials whose username
-is `cnb`.
+在 **Source Code Management > Git** 中填写 CNB HTTPS clone URL，并选择用户名为 `cnb` 的凭据。
 
-Enable **Build on CNB code or pull request events** to configure:
+启用 **Build on CNB code or pull request events** 后，可以配置：
 
-- Push, tag, branch, and pull request events.
-- Filters for branches, tags, pull request source branches, and target branches.
-- Draft/WIP status, required labels, and excluded labels.
-- `[ci skip]`, `[ci-skip]`, and `[skip ci]` handling.
-- Builds only when the pull request source SHA changes.
-- Rebuilds of open pull requests when the source branch, or source and target branches, change.
-- Cancellation of stale queued or running builds when a pull request is updated.
-- Comment triggers restricted by RE2/J expressions and target repository member roles.
-- Filling an empty build description from the CNB Cause, enabled by default.
+- Push、Tag、分支和 Pull Request 事件。
+- 分支、Tag、Pull Request 源分支和目标分支过滤。
+- Draft/WIP、必需标签和排除标签。
+- `[ci skip]`、`[ci-skip]` 和 `[skip ci]`。
+- 仅在 Pull Request source SHA 变化时构建。
+- 源分支或源+目标分支更新时构建开放 Pull Request。
+- Pull Request 更新时取消过期的排队构建或运行中构建。
+- 使用 RE2/J 表达式和目标仓库成员角色限制评论触发。
+- 使用 CNB Cause 填充空的构建描述；该选项默认开启。
 
-Only `push` and `tag_push` are enabled by default. Pull request and comment events must be enabled
-explicitly.
+默认只启用 `push` 和 `tag_push`。Pull Request 和评论事件需要显式开启。
 
-Freestyle jobs also support these Post-build Actions:
+Freestyle Job 还可以添加以下 Post-build Actions：
 
 - **Report build metadata to CNB**
 - **Perform a CNB pull request action**
 
-Pull request actions run only after successful builds by default. Before disabling this restriction,
-confirm that failed builds should also modify CNB. Destructive operations still require an explicit
-confirmation value.
+Pull Request Action 默认只在成功构建后执行。关闭此限制前，请确认失败构建也应修改 CNB；破坏性操作
+仍需要显式确认值。
 
 ## Webhook
 
-CNB does not currently provide an API for Jenkins to create repository webhooks automatically. Use the
-pinned `cnbcool/webhook:v1.0.2` version in a trusted `.cnb.yml` and follow the
-[webhook setup guide](docs/webhook.md) to forward its default flat `CNB_*` JSON payload directly.
+CNB 当前没有供 Jenkins 自动创建仓库 Webhook 的 API。请在可信的 `.cnb.yml` 中使用固定版本的
+`cnbcool/webhook:v1.0.2`，并按照 [Webhook 接入指南](docs/webhook.md) 直接转发插件默认的扁平
+`CNB_*` JSON。
 
-The Jenkins endpoint is:
+Jenkins 接收地址为：
 
 ```text
 https://<jenkins>/cnb-webhook/<server-id>/
 ```
 
-To configure it:
+配置步骤：
 
-1. Create a Secret Text credential in Jenkins containing at least 32 bytes.
-2. Map the full repository path to that credential under the CNB server's **Repository webhook secrets**.
-3. Store the same value as the protected CNB repository secret `JENKINS_CNB_WEBHOOK_SECRET`.
-4. Reference only `${JENKINS_CNB_WEBHOOK_SECRET}` in `.cnb.yml`; do not commit the secret in plain text.
-5. Ensure CNB can reach Jenkins over HTTPS.
+1. 在 Jenkins 中创建至少 32 字节的 Secret Text。
+2. 在 CNB Server 的 **Repository webhook secrets** 中绑定完整仓库路径。
+3. 将相同值保存为 CNB 受保护仓库密钥 `JENKINS_CNB_WEBHOOK_SECRET`。
+4. 在 `.cnb.yml` 中只引用 `${JENKINS_CNB_WEBHOOK_SECRET}`，不要提交明文密钥。
+5. 确保外部 CNB 可以通过 HTTPS 访问 Jenkins。
 
-The webhook accepts only JSON POST requests with an `X-CNB-Signature` header. Each repository uses a
-separate HMAC key. Request bodies are limited to 1 MiB; larger requests return `413`.
+Webhook 只接受带 `X-CNB-Signature` 的 JSON POST。每个仓库使用独立 HMAC 密钥，请求体最大为
+1 MiB；超限请求返回 `413`。
 
-The plugin validates the time window and delivery ID, and confirms the repository revision through the
-CNB API before scheduling a build. Keep event polling enabled to refresh SCM Sources and recover missed
-push/tag events for classic jobs. Pull request, review, and comment events still require webhooks.
+插件会校验时间窗口和 delivery ID，并在调度前从 CNB API 确认仓库 revision。保持事件轮询开启，
+可以刷新 SCM Source，并为 Classic Job 回补 Push/Tag。Pull Request、评审和评论事件仍必须通过 Webhook。
 
-## Build environment variables
+## 构建环境变量
 
-Classic jobs triggered by webhooks receive `CNB_*` environment variables. Common variables include:
+Webhook 触发的 Classic Job 会获得 `CNB_*` 环境变量。常用变量包括：
 
 ```text
 CNB_SERVER_ID
@@ -266,7 +231,7 @@ CNB_BUILD_USER
 CNB_BUILD_USER_EMAIL
 ```
 
-Pull request, review, and comment events also provide:
+Pull Request、评审和评论事件还会提供：
 
 ```text
 CNB_PULL_REQUEST_IID
@@ -289,56 +254,51 @@ CNB_REVIEW_ID
 CNB_REVIEW_DESCRIPTION
 ```
 
-Variables that do not apply to the current event are empty strings.
+不适用于当前事件的变量为空字符串。
 
 ## Pipeline
 
-After installation, open **Pipeline Syntax** and select a CNB step to see its full parameters and return
-values for the installed version.
+安装后打开 **Pipeline Syntax**，选择 CNB step 查看当前版本的完整参数和返回值。
 
-Except for `cnbBuildMetadata`, CNB API steps support these optional context parameters:
+除 `cnbBuildMetadata` 外，CNB API steps 都支持以下可选上下文参数：
 
 ```text
 serverId repository pullRequestNumber sha credentialsId
 ```
 
-`serverId`, `repository`, `pullRequestNumber`, and `sha` can be resolved from Multibranch context, a webhook
-Cause, or the build environment. `credentialsId` is not read from environment variables. When omitted,
-the step uses item-scoped SCM credentials or the server's API credentials.
+`serverId`、`repository`、`pullRequestNumber` 和 `sha` 可以从 Multibranch、Webhook Cause 或构建环境
+解析。`credentialsId` 不从环境变量读取；省略时使用 item-scoped SCM 凭据或 Server API credentials。
 
-### Step index
+### Step 索引
 
-- General and commits: `cnbBuildMetadata`, `cnbCommit`, `cnbCommits`, `cnbCompareCommits`,
-  `cnbCommitAnnotations`, `cnbCommitStatuses`.
-- Badges: `cnbBadges`, `cnbBadge`, `cnbUploadBadge`.
-- Pull request queries and updates: `cnbPullRequests`, `cnbPullRequest`, `cnbCreatePullRequest`,
-  `cnbUpdatePullRequest`, `cnbMergePullRequest`, `cnbPullRequestAssignees`,
-  `cnbAddPullRequestAssignees`, `cnbRemovePullRequestAssignees`, `cnbAddPullRequestReviewers`,
-  `cnbRemovePullRequestReviewers`.
-- Pull request comments, labels, and reviews: `cnbPullRequestComments`, `cnbPullRequestCommentById`,
-  `cnbPullRequestComment`, `cnbUpdatePullRequestComment`, `cnbPullRequestLabelExists`,
-  `cnbPullRequestLabels`, `cnbPullRequestCommits`, `cnbPullRequestFiles`,
-  `cnbPullRequestStatuses`, `cnbPullRequestReviews`, `cnbPullRequestReviewComments`,
-  `cnbReviewPullRequest`, `cnbReplyPullRequestReviewComment`.
-- CNB builds: `cnbStartBuild`, `cnbBuildStatus`, `cnbStopBuild`, `cnbBuildHistory`,
-  `cnbBuildStage`, `cnbDownloadBuildRunnerLog`.
-- Releases and assets: `cnbReleases`, `cnbLatestRelease`, `cnbRelease`, `cnbReleaseByTag`,
-  `cnbReleaseAsset`, `cnbReleaseAssetHead`, `cnbCreateRelease`, `cnbUpdateRelease`,
-  `cnbDeleteRelease`, `cnbDeleteReleaseAsset`, `cnbUploadReleaseAsset`,
-  `cnbDownloadReleaseAsset`.
+- 通用与提交：`cnbBuildMetadata`、`cnbCommit`、`cnbCommits`、`cnbCompareCommits`、
+  `cnbCommitAnnotations`、`cnbCommitStatuses`。
+- Badge：`cnbBadges`、`cnbBadge`、`cnbUploadBadge`。
+- Pull Request 查询和修改：`cnbPullRequests`、`cnbPullRequest`、`cnbCreatePullRequest`、
+  `cnbUpdatePullRequest`、`cnbMergePullRequest`、`cnbPullRequestAssignees`、
+  `cnbAddPullRequestAssignees`、`cnbRemovePullRequestAssignees`、`cnbAddPullRequestReviewers`、
+  `cnbRemovePullRequestReviewers`。
+- Pull Request 评论、标签和评审：`cnbPullRequestComments`、`cnbPullRequestCommentById`、
+  `cnbPullRequestComment`、`cnbUpdatePullRequestComment`、`cnbPullRequestLabelExists`、
+  `cnbPullRequestLabels`、`cnbPullRequestCommits`、`cnbPullRequestFiles`、
+  `cnbPullRequestStatuses`、`cnbPullRequestReviews`、`cnbPullRequestReviewComments`、
+  `cnbReviewPullRequest`、`cnbReplyPullRequestReviewComment`。
+- CNB Build：`cnbStartBuild`、`cnbBuildStatus`、`cnbStopBuild`、`cnbBuildHistory`、
+  `cnbBuildStage`、`cnbDownloadBuildRunnerLog`。
+- Release 和 Asset：`cnbReleases`、`cnbLatestRelease`、`cnbRelease`、`cnbReleaseByTag`、
+  `cnbReleaseAsset`、`cnbReleaseAssetHead`、`cnbCreateRelease`、`cnbUpdateRelease`、
+  `cnbDeleteRelease`、`cnbDeleteReleaseAsset`、`cnbUploadReleaseAsset`、
+  `cnbDownloadReleaseAsset`。
 
-### Badges
+### Badge
 
-The plugin does not currently set build status badges automatically. CNB only permits uploads to
-`security/tca`, a key reserved for Tencent Code Analysis. Jenkins cannot overwrite it as a general build
-status badge.
+插件暂不自动设置构建状态 Badge。CNB 当前只允许上传 `security/tca`，该 key 属于腾讯云代码分析，不能被
+Jenkins 当作通用构建状态覆盖。
 
-TODO: Reconnect the retained automatic lifecycle reporting implementation when CNB provides a separate
-general-purpose badge key.
+TODO：CNB 开放独立的通用 Badge key 后，重新接入已保留的自动生命周期上报实现。
 
-The `cnbBadges`, `cnbBadge`, and manual `cnbUploadBadge` Pipeline steps remain available. Upload only when
-you explicitly intend to write a TCA badge, and ensure `env.GIT_COMMIT` contains the full commit SHA after
-checkout.
+`cnbBadges`、`cnbBadge` 和手动 `cnbUploadBadge` Pipeline step 继续保留。只有在明确要写入 TCA Badge 时
+才调用上传步骤，并确保 checkout 后 `env.GIT_COMMIT` 包含完整 Commit SHA。
 
 ```groovy
 def available = cnbBadges(repository: 'team/project')
@@ -359,13 +319,12 @@ def uploaded = cnbUploadBadge(
 echo "![TCA](${uploaded.latestUrl})"
 ```
 
-Badges are visual elements for READMEs and other displays, not CNB commit statuses or merge gates. The
-CNB server rejects uploads to keys other than `security/tca`.
+Badge 用于 README 和视觉展示，不是 CNB Commit Status 或合并门禁。CNB 服务端会拒绝除
+`security/tca` 以外的上传 key。
 
-### Pull request example
+### Pull Request 示例
 
-This example is for pull request builds. Regular branch builds must supply `repository`,
-`pullRequestNumber`, and `sha` explicitly.
+以下示例用于 Pull Request 构建；普通分支构建需要显式传入 `repository`、`pullRequestNumber` 和 `sha`。
 
 ```groovy
 pipeline {
@@ -389,7 +348,7 @@ pipeline {
 }
 ```
 
-### CNB token binding
+### CNB Token 绑定
 
 ```groovy
 withCredentials([cnbToken(credentialsId: 'cnb-api', variable: 'CNB_TOKEN')]) {
@@ -397,91 +356,84 @@ withCredentials([cnbToken(credentialsId: 'cnb-api', variable: 'CNB_TOKEN')]) {
 }
 ```
 
-Jenkins masks `CNB_TOKEN`. Do not include the token in URLs, build descriptions, or return values.
+Jenkins 会掩码 `CNB_TOKEN`。不要把 Token 拼入 URL、构建描述或返回值。
 
-Deleting releases/assets, removing assignees/reviewers, clearing/removing/replacing labels, and closing
-pull requests require a `confirm` parameter. The confirmation value must exactly match the target ID,
-tag, or pull request number.
+删除 Release/Asset、移除 Assignee/Reviewer、清空、移除或替换标签以及关闭 Pull Request 等操作需要
+`confirm` 参数。确认值必须与目标 ID、Tag 或 Pull Request number 精确匹配。
 
-Workspace upload and download paths must be relative and cannot contain parent directory segments,
-drive prefixes, or backslashes. Release asset uploads have a fixed 512 MiB limit. Release downloads and
-runner log downloads can be further restricted with `maxBytes`.
+workspace 上传和下载路径必须是相对路径，不能包含父目录、盘符或反斜杠。Release Asset 上传固定限制为
+512 MiB；Release 下载和 Runner log 下载可以用 `maxBytes` 进一步收紧。
 
-## Build result reporting
+## 结果上报
 
-Multibranch builds can automatically report queued, running, and final status. Classic jobs use
-**Report build metadata to CNB**; Pipelines use `cnbBuildMetadata`.
+Multibranch 构建可以自动上报 queued、running 和最终状态。Classic Job 使用
+**Report build metadata to CNB**，Pipeline 使用 `cnbBuildMetadata`。
 
-The CNB server's **Build result reporting** setting selects the reporting destination:
+上报目标由 CNB Server 的 **Build result reporting** 决定：
 
-- Pull request comments.
-- Commit/tag annotations, with the target determined by the current build context.
-- Both pull request comments and commit/tag annotations.
-- Automatic reporting disabled.
+- Pull Request 评论。
+- Commit/Tag annotation，具体目标由当前构建上下文决定。
+- Pull Request 评论和 Commit/Tag annotation 同时上报。
+- 关闭自动上报。
 
-Reporting credentials are selected in this order: explicit step or job credentials, result-reporting
-credentials, then API credentials.
+结果凭据按以下顺序选择：step 或 Job 显式凭据、Result-reporting credentials、API credentials。
 
-The `cnbSkipReporting` trait disables automatic reporting for a Branch Source. The `cnbReportingContext`
-trait sets a default context. Explicit Pipeline steps and Freestyle publishers are not affected by
-`cnbSkipReporting`.
+`cnbSkipReporting` trait 可以关闭某个 Branch Source 的自动上报；`cnbReportingContext` trait
+可以设置默认 context。显式 Pipeline step 和 Freestyle Publisher 不受 `cnbSkipReporting` 影响。
 
-CNB does not provide a native commit status API that Jenkins can write to. Reported comments and
-annotations cannot replace required status checks on CNB protected branches.
+CNB 没有供 Jenkins 写入的原生 Commit Status API。插件上报的评论和 annotations 不能替代 CNB
+保护分支中的 required status check。
 
-## Known limitations
+## 已知限制
 
-- Jenkins cannot create or delete webhooks through the CNB API. Run a `cnbcool/webhook` stage in `.cnb.yml`.
-- Native CNB commit statuses can only be read, not written by Jenkins.
-- CNB has not opened a general-purpose badge upload key. Automatic build status badges are pending
-  server support.
-- Badges are visual elements, not commit statuses or required checks.
-- CNB does not provide a deployment API for external CI systems.
-- CNB webhooks do not provide a trusted previous set of labels, so triggering only when a particular
-  label is newly added is not supported.
-- Git checkout supports HTTPS only, not SSH.
+- Jenkins 无法通过 CNB API 自动创建或删除 Webhook，必须在 `.cnb.yml` 中运行 `cnbcool/webhook` stage。
+- CNB 原生 Commit Status 只能读取，不能由 Jenkins 写入。
+- CNB 尚未开放通用 Badge 上传 key；自动构建状态 Badge 等待服务端支持后再接入。
+- Badge 是视觉展示，不是 Commit Status 或 required check。
+- CNB 没有供外部 CI 使用的 Deployment API。
+- CNB Webhook 不提供可信的标签变更前集合，因此不支持“仅在某标签刚添加时触发”。
+- Git checkout 只支持 HTTPS，不支持 SSH。
 
-## Troubleshooting
+## 故障排查
 
-### Webhook does not trigger a build
+### Webhook 没有触发构建
 
-- Check that the server ID in the URL matches the global Jenkins configuration.
-- Check that the repository path is mapped to the correct Secret Text credential.
-- Check that `.cnb.yml` uses the pinned `cnbcool/webhook:v1.0.2` version.
-- Confirm that the event is enabled in the job trigger and passes branch, tag, and draft filters.
-- `413` means the webhook request body exceeds 1 MiB.
-- Open **Manage Jenkins > CNB operational health** to inspect recent webhook results.
+- 检查 URL 中的 Server ID 是否与 Jenkins 全局配置一致。
+- 检查仓库路径是否绑定了正确的 Secret Text。
+- 检查 `.cnb.yml` 是否使用固定的 `cnbcool/webhook:v1.0.2`。
+- 确认事件已在 Job trigger 中启用，并通过分支、标签和 Draft 过滤。
+- `413` 表示 Webhook 请求体超过 1 MiB。
+- 打开 **Manage Jenkins > CNB operational health** 查看最近的 Webhook 结果。
 
-### CNB API errors
+### CNB API 返回错误
 
-- `401` usually means the token is invalid or expired.
-- `403` usually means the user role or token scopes are insufficient.
-- `429` or `5xx` may indicate CNB rate limiting or a temporary service failure.
+- `401` 通常表示 Token 无效或过期。
+- `403` 通常表示用户角色或 Token scope 不足。
+- `429` 或 `5xx` 可能是 CNB 限流或临时服务故障。
 
-### Git checkout fails
+### Git checkout 失败
 
-- Use an HTTPS clone URL.
-- Use **CNB access token**, or **Username with password** with the username set to `cnb`.
-- Do not select Secret Text as a checkout credential.
-- Confirm that the token has `repo-code:r` and access to the target repository.
+- 使用 HTTPS clone URL。
+- 使用 **CNB access token**，或用户名为 `cnb` 的 Username with password。
+- 不要选择 Secret Text 作为 checkout credential。
+- 确认 Token 具有 `repo-code:r` 并能访问目标仓库。
 
-For debugging, add a logger for `dev.zxilly.jenkins.cnb` under **Manage Jenkins > System Log**. Do not
-paste tokens, webhook payloads, or HMAC keys into logs.
+需要调试日志时，在 **Manage Jenkins > System Log** 中为
+`dev.zxilly.jenkins.cnb` 添加 Logger。日志中不要粘贴 Token、Webhook payload 或 HMAC 密钥。
 
-## Support and contributing
+## 支持与贡献
 
-This plugin is maintained by the community. It does not represent commercial support from CNB or Jenkins.
+这个插件由社区维护，不代表 CNB 或 Jenkins 官方提供商业支持。
 
-- Questions and feature requests: [GitHub Issues](https://github.com/Zxilly/jenkins-cnb/issues)
-- Security issues: [SECURITY.md](SECURITY.md)
-- Contribution guidelines: [CONTRIBUTING.md](CONTRIBUTING.md)
-- Version history: [CHANGELOG.md](CHANGELOG.md)
-- License: [MIT](LICENSE)
+- 使用问题和功能建议：[GitHub Issues](https://github.com/Zxilly/jenkins-cnb/issues)
+- 安全问题：[SECURITY.md](SECURITY.md)
+- 贡献指南：[CONTRIBUTING.md](CONTRIBUTING.md)
+- 版本记录：[CHANGELOG.md](CHANGELOG.md)
+- 许可证：[MIT](LICENSE)
 
-Building from source requires JDK 21 or 25. See [CONTRIBUTING.md](CONTRIBUTING.md) for build environment
-setup.
+从源码构建需要 JDK 21 或 25。构建环境准备见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-For local development:
+本地开发：
 
 ```bash
 ./mvnw -B -ntp clean verify
