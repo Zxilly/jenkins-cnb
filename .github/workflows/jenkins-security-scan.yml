@@ -60,9 +60,10 @@ jobs:
               - codeql/java-queries:AlertSuppression.ql
               - codeql/java-queries:AlertSuppressionAnnotations.ql
 
-      # Stable CodeQL currently supports Kotlin <2.4.10. This one analysis-only build compiles
-      # the same production sources with 2.4.0 so the Kotlin extractor runs; release artifacts and
-      # every normal build remain on 2.4.10. Remove the profile once github/codeql#22194 ships.
+      # The pinned CodeQL bundle supports Kotlin compilers <2.4.10. This analysis-only build
+      # uses compiler 2.4.0 with the unchanged production sources, kotlin-stdlib, and dependencies.
+      # Normal/release builds use kotlin.version throughout. Remove the profile once the pinned
+      # stable bundle includes github/codeql#22194.
       - name: Trace production Kotlin sources
         run: ./mvnw -B -ntp -V -Pcodeql-kotlin-compat -DskipTests clean package
 

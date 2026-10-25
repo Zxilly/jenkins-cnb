@@ -59,7 +59,8 @@
     <maven.compiler.release>17</maven.compiler.release>
     <maven.compiler.testRelease>17</maven.compiler.testRelease>
     <kotlin.version>2.4.21</kotlin.version>
-    <kotlinx.serialization.version>1.11.0</kotlinx.serialization.version>
+    <kotlin.compiler.version>${kotlin.version}</kotlin.compiler.version>
+    <kotlinx.serialization.version>1.12.0</kotlinx.serialization.version>
     <kotlinx.io.version>0.9.1</kotlinx.io.version>
     <ktor.version>3.6.0</ktor.version>
     <httpclient5.version>5.6.5</httpclient5.version>
@@ -357,7 +358,7 @@
       <plugin>
         <groupId>org.jetbrains.kotlin</groupId>
         <artifactId>kotlin-maven-plugin</artifactId>
-        <version>${kotlin.version}</version>
+        <version>${kotlin.compiler.version}</version>
         <configuration>
           <compilerPlugins>
             <plugin>kotlinx-serialization</plugin>
@@ -367,7 +368,7 @@
           <dependency>
             <groupId>org.jetbrains.kotlin</groupId>
             <artifactId>kotlin-maven-serialization</artifactId>
-            <version>${kotlin.version}</version>
+            <version>${kotlin.compiler.version}</version>
           </dependency>
         </dependencies>
         <executions>
@@ -585,14 +586,15 @@
       </build>
     </profile>
     <!--
-      Stable CodeQL does not yet understand Kotlin 2.4.10. Normal and release builds stay on
-      Kotlin 2.4.10; activate this profile only for CodeQL extraction. Remove it after
-      github/codeql#22194 is included in a stable CodeQL bundle.
+      The pinned CodeQL bundle requires a Kotlin compiler older than 2.4.10. Override only
+      the compiler for extraction; keep the production kotlin-stdlib and dependency graph
+      unchanged. Normal and release builds use kotlin.version for both. Remove this profile
+      after github/codeql#22194 is included in the pinned stable CodeQL bundle.
     -->
     <profile>
       <id>codeql-kotlin-compat</id>
       <properties>
-        <kotlin.version>2.4.0</kotlin.version>
+        <kotlin.compiler.version>2.4.0</kotlin.compiler.version>
       </properties>
     </profile>
   </profiles>
